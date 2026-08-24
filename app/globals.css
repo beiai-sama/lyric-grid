@@ -117,13 +117,22 @@ button { color: inherit; }
 .analysis-spark { color: var(--lime); margin-right: 7px; }
 .svp-note-panel { margin-top: 10px; padding: 10px; border: 1px solid #30403b; border-radius: 12px; background: #111719; }
 .svp-note-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: #909c96; font-size: 11px; }
+.svp-note-heading > span { display: flex; align-items: baseline; gap: 7px; }
 .svp-note-heading b { color: #c7d2cc; }
 .svp-note-heading small { color: #61706a; font: 8px ui-monospace, monospace; }
-.svp-note-scroll { margin-top: 8px; overflow-x: auto; padding: 3px 1px 8px; scrollbar-color: #36413d transparent; }
+.svp-note-tools { display: flex; gap: 5px; }
+.svp-note-tools button { height: 27px; border: 1px solid #35433d; border-radius: 7px; background: #1b2423; color: #9eaaa4; padding: 0 8px; font-size: 9px; cursor: pointer; }
+.svp-note-tools button:first-child { border-color: #53673f; color: var(--lime); }
+.svp-note-tools button:disabled { opacity: .38; cursor: not-allowed; }
+.svp-split-help { margin: 7px 0 0; color: #77837d; font-size: 10px; line-height: 1.5; }
+.svp-note-scroll { margin-top: 7px; overflow-x: auto; padding: 3px 3px 8px; scrollbar-color: #36413d transparent; }
 .svp-note-flow { min-width: max-content; height: 92px; display: flex; align-items: flex-start; gap: 3px; }
-.svp-note { flex: 0 0 auto; height: 43px; border: 1px solid #49603c; border-radius: 8px; background: linear-gradient(180deg, #2b3927, #222d22); display: grid; place-items: center; align-content: center; gap: 3px; color: #e9f0e4; overflow: hidden; }
+.svp-note { position: relative; flex: 0 0 auto; height: 43px; border: 1px solid #49603c; border-radius: 8px; background: linear-gradient(180deg, #2b3927, #222d22); display: grid; place-items: center; align-content: center; gap: 3px; color: #e9f0e4; overflow: hidden; cursor: pointer; }
 .svp-note b { max-width: calc(100% - 6px); overflow: hidden; text-overflow: ellipsis; font: 700 11px ui-monospace, "Cascadia Code", monospace; }
 .svp-note small { color: #99a693; font-size: 9px; }
+.svp-note.selected { border-color: var(--lime); box-shadow: 0 0 0 2px color-mix(in srgb, var(--lime) 28%, transparent), 0 0 18px color-mix(in srgb, var(--lime) 18%, transparent); transform: translateY(-2px); }
+.svp-note.selected::before { content: "句首"; position: absolute; left: 3px; top: 2px; color: var(--lime); font-size: 7px; font-weight: 850; }
+.svp-note:disabled { cursor: not-allowed; opacity: .72; }
 .svp-note.hold { border-style: dashed; border-color: #49554f; background: #1a2122; color: #73807a; }
 .svp-note.syllable { border-color: #39716e; background: #1d302f; color: var(--cyan); }
 .svp-note.breath { border-style: dotted; border-color: #64583e; background: #29251c; color: var(--amber); }
@@ -324,12 +333,13 @@ button { color: inherit; }
 .svp-track-list small { color: #69756f; font-size: 8px; }
 .svp-phrase-setting { margin-top: 12px; padding: 11px 12px; border: 1px solid #2d3837; border-radius: 11px; background: #111719; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .svp-phrase-setting > span { display: grid; gap: 3px; }
-.svp-phrase-setting b { color: #cbd4ce; font-size: 10px; }
-.svp-phrase-setting small { color: #68746e; font-size: 8px; }
+.svp-phrase-setting b { color: #d7ded9; font-size: 11px; }
+.svp-phrase-setting small { color: #84908a; font-size: 10px; }
 .svp-phrase-setting > div { display: flex; gap: 4px; }
-.svp-phrase-setting button { height: 28px; border: 1px solid #303b39; border-radius: 7px; background: #1b2324; color: #7e8a84; padding: 0 9px; font-size: 8px; cursor: pointer; }
+.svp-phrase-setting button { height: 31px; border: 1px solid #303b39; border-radius: 7px; background: #1b2324; color: #96a19b; padding: 0 10px; font-size: 10px; cursor: pointer; }
 .svp-phrase-setting button.selected { border-color: #5a713d; background: #27331f; color: var(--lime); }
-.svp-import-note { margin-top: 10px; color: #69756f; font-size: 8px; line-height: 1.6; }
+.svp-import-note { margin-top: 11px; color: #84908a; font-size: 10px; line-height: 1.65; }
+.svp-import-note b { color: var(--lime); font-size: 11px; }
 .tutorial-backdrop { z-index: 50; }
 .tutorial-modal { width: min(650px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; border: 1px solid #46543e; border-radius: 22px; background: radial-gradient(circle at 90% 0, color-mix(in srgb, var(--lime) 10%, transparent), transparent 32%), var(--panel); padding: 28px; box-shadow: 0 35px 120px rgba(0, 0, 0, .58); }
 .tutorial-kicker { color: var(--lime); font-size: 9px; font-weight: 850; letter-spacing: .12em; }

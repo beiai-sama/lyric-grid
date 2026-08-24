@@ -20,8 +20,11 @@ import { analyzeChineseCells } from '../lib/chinese';
 import {
   SvpLineMeta,
   SvpProject,
+  SvpSegmentation,
+  importSvpPhrase,
   importSvpTrack,
   parseSvpProject,
+  splitSvpTrack,
 } from '../lib/svp';
 
 type LyricLine = ParsedLyricLine & {
@@ -37,6 +40,7 @@ type PendingSvpImport = {
   project: SvpProject;
   trackId: string;
   maximumSyllables: number;
+  segmentation: SvpSegmentation;
 };
 
 type ThemeConfig = {
@@ -180,6 +184,7 @@ export default function Home() {
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [hideTutorialNextTime, setHideTutorialNextTime] = useState(false);
   const [svpImport, setSvpImport] = useState<PendingSvpImport | null>(null);
+  const [selectedSvpNoteId, setSelectedSvpNoteId] = useState('');
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewShowPronunciation, setPreviewShowPronunciation] = useState(true);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
@@ -249,6 +254,17 @@ export default function Home() {
       maximum: pitches.length ? Math.max(...pitches) : 60,
     };
   }, [activeLine]);
+  const estimatedSvpPhrases = useMemo(() => {
+    if (!svpImport) return 0;
+    const track = svpImport.project.tracks.find((candidate) => candidate.id === svpImport.trackId);
+    return track ? splitSvpTrack(track, svpImport.maximumSyllables, svpImport.segmentation).length : 0;
+  }, [svpImport]);
+  const canMergeNextSvpLine = Boolean(
+    activeLine?.svp
+    && lines[activeIndex + 1]?.svp
+    && lines[activeIndex + 1].svp?.trackName === activeLine.svp.trackName
+    && lines[activeIndex + 1].svp?.version === activeLine.svp.version,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -606,7 +622,7 @@ export default function Home() {
     try {
       const project = parseSvpProject(await file.text());
       const defaultTrack = project.tracks.reduce((best, track) => track.notes.length > best.notes.length ? track : best);
-      setSvpImport({ fileName: file.name, project, trackId: defaultTrack.id, maximumSyllables: 18 });
+      setSvpImport({ fileName: file.name, project, trackId: defaultTrack.id, maximumSyllables: 18, segmentation: 'balanced' });
       setImportOpen(false);
     } catch (error) {
       console.error(error);
@@ -618,7 +634,7 @@ export default function Home() {
     if (!svpImport) return;
     setAnalyzing(true);
     try {
-      const imported = await importSvpTrack(svpImport.project, svpImport.trackId, svpImport.maximumSyllables);
+      const imported = await importSvpTrack(svpImport.project, svpImport.trackId, svpImport.maximumSyllables, svpImport.segmentation);
       const timestamp = Date.now();
       const nextLines: LyricLine[] = imported.map((line, index) => ({
         ...line,
@@ -636,6 +652,82 @@ export default function Home() {
     } catch (error) {
       console.error(error);
       flash(error instanceof Error ? error.message : 'SVP 轨道分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const splitActiveSvpLine = async () => {
+    if (!activeLine.svp || !selectedSvpNoteId) {
+      flash('先在 SVP 音符条里点一下新句的第一个音符');
+      return;
+    }
+    const noteIndex = activeLine.svp.notes.findIndex((note) => note.id === selectedSvpNoteId);
+    if (noteIndex <= 0 || noteIndex >= activeLine.svp.notes.length) {
+      flash('请选择中间的普通音符作为下一句开头');
+      return;
+    }
+    const chosenNote = activeLine.svp.notes[noteIndex];
+    if (chosenNote.role !== 'normal') {
+      flash('延音不能作为句首，请选择后面的实际发音');
+      return;
+    }
+
+    setAnalyzing(true);
+    try {
+      const { notes, ...meta } = activeLine.svp;
+      const [leftGenerated, rightGenerated] = await Promise.all([
+        importSvpPhrase(meta, notes.slice(0, noteIndex), activeIndex),
+        importSvpPhrase(meta, notes.slice(noteIndex), activeIndex + 1),
+      ]);
+      const targetPivot = leftGenerated.target.length;
+      const leftDraft = activeLine.target.slice(0, targetPivot);
+      const rightDraft = activeLine.target.slice(targetPivot);
+      const rightId = `svp-manual-${Date.now()}`;
+      const left: LyricLine = {
+        ...leftGenerated,
+        id: activeLine.id,
+        target: leftDraft.length ? leftDraft : leftGenerated.target,
+      };
+      const right: LyricLine = {
+        ...rightGenerated,
+        id: rightId,
+        target: rightDraft.length ? rightDraft : rightGenerated.target,
+      };
+      setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [left, right] : [line]));
+      setActiveId(rightId);
+      setSelectedCell(0);
+      setSelectedSvpNoteId('');
+      flash('已从选中音符切成上下两句');
+    } catch (error) {
+      console.error(error);
+      flash('这次断句没有成功，请换一个音符再试');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const mergeNextSvpLine = async () => {
+    const nextLine = lines[activeIndex + 1];
+    if (!activeLine.svp || !nextLine?.svp || !canMergeNextSvpLine) {
+      flash('下一句不是同一条 SVP 轨道，不能直接合并');
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const { notes, ...meta } = activeLine.svp;
+      const generated = await importSvpPhrase(meta, [...notes, ...nextLine.svp.notes], activeIndex);
+      const merged: LyricLine = {
+        ...generated,
+        id: activeLine.id,
+        target: [...activeLine.target, ...nextLine.target],
+      };
+      setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [merged] : line.id === nextLine.id ? [] : [line]));
+      setSelectedSvpNoteId('');
+      flash('已与下一句合并');
+    } catch (error) {
+      console.error(error);
+      flash('这两句暂时无法合并');
     } finally {
       setAnalyzing(false);
     }
@@ -811,7 +903,7 @@ export default function Home() {
                     if (element) lineButtonRefs.current.set(line.id, element);
                     else lineButtonRefs.current.delete(line.id);
                   }}
-                  onClick={() => { setActiveId(line.id); setSelectedCell(0); }}
+                  onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); }}
                 >
                   <span className="line-index">{String(index + 1).padStart(2, '0')}</span>
                   <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}{rhyme?.final && <em> · {rhyme.final} 韵</em>}</small></span>
@@ -871,24 +963,31 @@ export default function Home() {
             {activeLine.svp && (
               <div className="svp-note-panel">
                 <div className="svp-note-heading">
-                  <span><b>SVP 音符</b> · {activeLine.svp.trackName}</span>
-                  <small>v{activeLine.svp.version} · {formatTime(activeLine.start ?? 0)}–{formatTime(activeLine.end ?? 0)}</small>
+                  <span><b>SVP 音符</b> · {activeLine.svp.trackName}<small>v{activeLine.svp.version} · {formatTime(activeLine.start ?? 0)}–{formatTime(activeLine.end ?? 0)}</small></span>
+                  <div className="svp-note-tools">
+                    <button disabled={!selectedSvpNoteId || analyzing} onClick={splitActiveSvpLine}>从选中音符断句</button>
+                    <button disabled={!canMergeNextSvpLine || analyzing} onClick={mergeNextSvpLine}>与下一句合并</button>
+                  </div>
                 </div>
+                <p className="svp-split-help">句子黏在一起时，点一下“下一句的第一个实际发音”，再按“从选中音符断句”。</p>
                 <div className="svp-note-scroll" aria-label="SVP 音符时间线">
                   <div className="svp-note-flow">
                     {activeLine.svp.notes.map((note) => {
                       const width = Math.max(42, Math.min(112, note.durationSeconds * 92));
                       const pitchOffset = Math.min(44, (activeSvpPitchRange.maximum - note.pitch) * 2.2);
                       return (
-                        <div
-                          className={`svp-note ${note.role}`}
+                        <button
+                          type="button"
+                          className={`svp-note ${note.role} ${selectedSvpNoteId === note.id ? 'selected' : ''}`}
                           key={note.id}
                           style={{ width: `${width}px`, marginTop: `${pitchOffset}px` }}
-                          title={`${note.lyric} · MIDI ${note.pitch} · ${Math.round(note.durationSeconds * 1000)}ms`}
+                          disabled={note.role !== 'normal'}
+                          onClick={() => setSelectedSvpNoteId((current) => current === note.id ? '' : note.id)}
+                          title={note.role === 'normal' ? `点此把“${note.lyric}”设为下一句开头` : `${note.lyric} · ${note.role === 'hold' ? '续音不能作为句首' : '请选择实际发音音符'}`}
                         >
                           <b>{note.role === 'hold' ? '—' : note.lyric}</b>
                           <small>{note.role === 'hold' ? '续音' : note.role === 'syllable' ? '拆音' : `${Math.round(note.durationSeconds * 1000)}ms`}</small>
-                        </div>
+                        </button>
                       );
                     })}
                   </div>
@@ -989,7 +1088,7 @@ export default function Home() {
                 const target = line.target.map((cell) => cell || '□').join('');
                 const hasDraft = line.target.some((cell) => cell.trim() && cell !== '—');
                 return (
-                  <button className={`preview-line ${line.id === activeId ? 'active' : ''}`} key={line.id} onClick={() => { setActiveId(line.id); setSelectedCell(0); setPreviewOpen(false); }}>
+                  <button className={`preview-line ${line.id === activeId ? 'active' : ''}`} key={line.id} onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); setPreviewOpen(false); }}>
                     <span className="preview-line-index">{String(index + 1).padStart(2, '0')}</span>
                     <span className="preview-line-body">
                       <span className="preview-source" lang="ja">{line.source}</span>
@@ -1115,11 +1214,20 @@ export default function Home() {
             </div>
 
             <div className="svp-phrase-setting">
-              <span><b>自动分句长度</b><small>句子太碎或太长时，可以换一档</small></span>
+              <span><b>参考句长</b><small>只在自然停顿处切，不会为了凑长度把词腰斩</small></span>
               <div>{[12, 18, 24].map((value) => <button className={svpImport.maximumSyllables === value ? 'selected' : ''} key={value} onClick={() => setSvpImport((current) => current ? { ...current, maximumSyllables: value } : current)}>{value === 12 ? '短句' : value === 18 ? '常规' : '长句'}</button>)}</div>
             </div>
 
-            <div className="svp-import-note">会读取歌词、音高、时值、休止与音符组；歌曲音频仍需单独上传。</div>
+            <div className="svp-phrase-setting">
+              <span><b>断句力度</b><small>根据停顿、文字类型变化和句长综合判断</small></span>
+              <div>{([
+                ['conservative', '保守'],
+                ['balanced', '标准'],
+                ['strict', '积极'],
+              ] as Array<[SvpSegmentation, string]>).map(([value, label]) => <button className={svpImport.segmentation === value ? 'selected' : ''} key={value} onClick={() => setSvpImport((current) => current ? { ...current, segmentation: value } : current)}>{label}</button>)}</div>
+            </div>
+
+            <div className="svp-import-note">当前预计拆成 <b>{estimatedSvpPhrases}</b> 句。导入后仍可直接点击音符手动断句或与下一句合并；歌曲音频仍需单独上传。</div>
             <div className="modal-actions"><button onClick={() => setSvpImport(null)}>取消</button><button className="analyze-button" disabled={analyzing} onClick={confirmSvpImport}>{analyzing ? '正在拆分音符…' : '导入所选轨道 →'}</button></div>
           </section>
         </div>
@@ -1139,7 +1247,7 @@ export default function Home() {
             </div>
 
             <ol className="tutorial-steps">
-              <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、SRT 或 LRC，罗马音会自动出来。</small></p></li>
+              <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、SRT 或 LRC。SVP 句子黏住时，点音符即可手动断句。</small></p></li>
               <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
               <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。格子下方会显示拼音，句尾会告诉你是什么韵。</small></p></li>
               <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>

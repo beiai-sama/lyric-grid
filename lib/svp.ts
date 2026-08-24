@@ -73,6 +73,8 @@ export type SvpProject = {
   tracks: SvpTrack[];
 };
 
+export type SvpSegmentation = 'conservative' | 'balanced' | 'strict';
+
 export type SvpLineMeta = {
   version: number;
   trackName: string;
@@ -214,20 +216,43 @@ function noteAddsSyllable(note: SvpNote): boolean {
   return note.role === 'normal' || note.role === 'syllable';
 }
 
-export function splitSvpTrack(track: SvpTrack, maximumSyllables = 18): SvpNote[][] {
+function lyricScript(value: string): 'han' | 'kana' | 'latin' | 'other' {
+  if (/\p{Script=Han}/u.test(value)) return 'han';
+  if (/[\u3040-\u30ff]/.test(value)) return 'kana';
+  if (/[A-Za-z]/.test(value)) return 'latin';
+  return 'other';
+}
+
+export function splitSvpTrack(track: SvpTrack, maximumSyllables = 18, segmentation: SvpSegmentation = 'balanced'): SvpNote[][] {
   const phrases: SvpNote[][] = [];
   let current: SvpNote[] = [];
   let syllables = 0;
+  const threshold = {
+    conservative: { hard: 0.55, medium: 0.34, soft: 0.18, script: 0.1 },
+    balanced: { hard: 0.5, medium: 0.24, soft: 0.09, script: 0.06 },
+    strict: { hard: 0.42, medium: 0.18, soft: 0.06, script: 0.02 },
+  }[segmentation];
 
   track.notes.forEach((note) => {
     const previous = current[current.length - 1];
+    const previousLyric = [...current].reverse().find((candidate) => candidate.role === 'normal');
     const gap = previous ? Math.max(0, note.startSeconds - previous.endSeconds) : 0;
     const groupChanged = Boolean(previous && previous.groupId !== note.groupId);
-    const hardBreak = Boolean(previous && syllables >= 3 && (gap >= 0.55 || groupChanged));
-    const softBreak = Boolean(previous && syllables >= 8 && gap >= 0.16);
-    const lengthBreak = Boolean(previous && syllables >= maximumSyllables && (gap >= 0.04 || syllables >= maximumSyllables + 4));
+    const scriptChanged = Boolean(
+      note.role === 'normal'
+      && previousLyric
+      && lyricScript(note.lyric) !== lyricScript(previousLyric.lyric)
+      && lyricScript(note.lyric) !== 'other'
+      && lyricScript(previousLyric.lyric) !== 'other',
+    );
+    const punctuationBreak = Boolean(previousLyric && /[。！？!?、，,；;：:]$/u.test(previousLyric.lyric));
+    const hardBreak = Boolean(previous && syllables >= 3 && (gap >= threshold.hard || groupChanged));
+    const mediumBreak = Boolean(previous && syllables >= 3 && gap >= threshold.medium);
+    const scriptBreak = Boolean(previous && syllables >= 3 && scriptChanged && gap >= threshold.script);
+    const softBreak = Boolean(previous && syllables >= 8 && gap >= threshold.soft);
+    const lengthBreak = Boolean(previous && syllables >= maximumSyllables && gap >= 0.02);
 
-    if (current.length && (hardBreak || softBreak || lengthBreak)) {
+    if (current.length && note.role === 'normal' && (punctuationBreak || hardBreak || mediumBreak || scriptBreak || softBreak || lengthBreak)) {
       phrases.push(current);
       current = [];
       syllables = 0;
@@ -321,36 +346,33 @@ async function phraseTokensAndTarget(notes: SvpNote[], language: string, chinese
   return { tokens, target };
 }
 
-export async function importSvpTrack(project: SvpProject, trackId: string, maximumSyllables = 18): Promise<SvpImportedLine[]> {
+export async function importSvpPhrase(meta: Omit<SvpLineMeta, 'notes'>, notes: SvpNote[], phraseIndex = 0): Promise<SvpImportedLine> {
+  const source = displaySource(notes);
+  const visibleLyrics = notes.filter((note) => note.role === 'normal').map((note) => note.lyric);
+  const chineseContent = visibleLyrics.filter(isHan).length > visibleLyrics.length / 2;
+  const { tokens, target } = await phraseTokensAndTarget(notes, meta.language, chineseContent, phraseIndex);
+  const language: ParsedLyricLine['language'] = chineseContent
+    ? 'zh'
+    : meta.language === 'english'
+      ? 'en'
+      : 'ja';
+  return {
+    source: source || `SVP 第 ${phraseIndex + 1} 句`,
+    kana: meta.language === 'japanese' ? tokens.map((token) => token.label).join(' ') : '',
+    tokens,
+    language,
+    uncertain: false,
+    start: notes[0].startSeconds,
+    end: notes[notes.length - 1].endSeconds,
+    target: target.length ? target : Array.from({ length: Math.max(1, tokens.filter((token) => token.counted).length) }, () => ''),
+    svp: { ...meta, notes },
+  };
+}
+
+export async function importSvpTrack(project: SvpProject, trackId: string, maximumSyllables = 18, segmentation: SvpSegmentation = 'balanced'): Promise<SvpImportedLine[]> {
   const track = project.tracks.find((candidate) => candidate.id === trackId);
   if (!track) throw new Error('没有找到选择的 SVP 轨道');
-  const phrases = splitSvpTrack(track, maximumSyllables);
-
-  return Promise.all(phrases.map(async (notes, phraseIndex) => {
-    const source = displaySource(notes);
-    const visibleLyrics = notes.filter((note) => note.role === 'normal').map((note) => note.lyric);
-    const chineseContent = visibleLyrics.filter(isHan).length > visibleLyrics.length / 2;
-    const { tokens, target } = await phraseTokensAndTarget(notes, track.language, chineseContent, phraseIndex);
-    const language: ParsedLyricLine['language'] = chineseContent
-      ? 'zh'
-      : track.language === 'english'
-        ? 'en'
-        : 'ja';
-    return {
-      source: source || `SVP 第 ${phraseIndex + 1} 句`,
-      kana: track.language === 'japanese' ? tokens.map((token) => token.label).join(' ') : '',
-      tokens,
-      language,
-      uncertain: false,
-      start: notes[0].startSeconds,
-      end: notes[notes.length - 1].endSeconds,
-      target: target.length ? target : Array.from({ length: Math.max(1, tokens.filter((token) => token.counted).length) }, () => ''),
-      svp: {
-        version: project.version,
-        trackName: track.name,
-        language: track.language,
-        notes,
-      },
-    };
-  }));
+  const phrases = splitSvpTrack(track, maximumSyllables, segmentation);
+  const meta = { version: project.version, trackName: track.name, language: track.language };
+  return Promise.all(phrases.map((notes, phraseIndex) => importSvpPhrase(meta, notes, phraseIndex)));
 }
