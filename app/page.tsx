@@ -11,6 +11,7 @@ import {
 } from '../lib/phonetics';
 import {
   lyricSimilarity,
+  parseLrc,
   parseSrt,
   recognizeSubtitleText,
   targetTextToCells,
@@ -72,6 +73,18 @@ function downloadFile(name: string, content: string, type: string) {
   anchor.download = name;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+async function readLyricFile(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const utf8 = new TextDecoder('utf-8').decode(buffer);
+  if (!utf8.includes('\uFFFD')) return utf8;
+  try {
+    const gb18030 = new TextDecoder('gb18030').decode(buffer);
+    return gb18030.includes('\uFFFD') ? utf8 : gb18030;
+  } catch {
+    return utf8;
+  }
 }
 
 export default function Home() {
@@ -323,10 +336,14 @@ export default function Home() {
   const handleSubtitle = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const cues = parseSrt(await file.text());
+    const content = await readLyricFile(file);
+    const lrcFirst = /\.lrc$/i.test(file.name);
+    const primaryCues = lrcFirst ? parseLrc(content) : parseSrt(content);
+    const cues = primaryCues.length ? primaryCues : lrcFirst ? parseSrt(content) : parseLrc(content);
+    const formatLabel = parseLrc(content).length ? 'LRC' : 'SRT';
     event.target.value = '';
     if (!cues.length) {
-      flash('没有识别到有效的 SRT 时间轴');
+      flash('没有识别到有效的歌词时间轴');
       return;
     }
 
@@ -389,8 +406,8 @@ export default function Home() {
         }));
         setLines(parsed);
         setActiveId(parsed[0].id);
-        setProjectTitle(file.name.replace(/\.(srt|str)$/i, '') || '字幕翻填工程');
-        flash(`已从字幕新建 ${parsed.length} 句歌词工程`);
+        setProjectTitle(file.name.replace(/\.(srt|str|lrc)$/i, '') || '字幕翻填工程');
+        flash(`已从 ${formatLabel} 新建 ${parsed.length} 句歌词工程`);
       }
 
       setSubtitleName(file.name);
@@ -399,7 +416,7 @@ export default function Home() {
       setFollowLyrics(true);
     } catch (error) {
       console.error(error);
-      flash('字幕歌词分析失败，请检查文件内容');
+      flash('歌词时间轴分析失败，请检查文件内容');
     } finally {
       setAnalyzing(false);
     }
@@ -605,7 +622,7 @@ export default function Home() {
           <div className="listen-heading"><span className="eyebrow">听感校对</span><h2>这一句怎么唱</h2></div>
           <div className="audio-card">
             <input ref={fileRef} type="file" accept="audio/*" onChange={handleAudio} hidden />
-            <input ref={subtitleRef} type="file" accept=".srt,.str,application/x-subrip,text/plain" onChange={handleSubtitle} hidden />
+            <input ref={subtitleRef} type="file" accept=".srt,.str,.lrc,application/x-subrip,text/plain" onChange={handleSubtitle} hidden />
             <audio ref={audioRef} src={audioUrl || undefined} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration); event.currentTarget.playbackRate = rate; }} onTimeUpdate={handleTimeUpdate} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
             <div className="waveform" aria-hidden="true">{Array.from({ length: 38 }, (_, index) => <i key={index} style={{ height: `${18 + ((index * 17) % 54)}%` }} />)}</div>
             <input className="audio-slider" type="range" min="0" max={duration || 1} step="0.01" value={Math.min(currentTime, duration || 1)} onChange={(event) => { const value = Number(event.target.value); setCurrentTime(value); if (audioRef.current) audioRef.current.currentTime = value; }} aria-label="音频进度" />
@@ -613,7 +630,7 @@ export default function Home() {
             <div className="transport"><button className="speed-button" onClick={cycleRate}>{rate}×</button><button className="play-button" aria-label={playing ? '暂停' : '播放'} onClick={togglePlay}>{playing ? 'Ⅱ' : '▶'}</button><button className={`loop-button ${looping ? 'on' : ''}`} onClick={() => { setLooping((value) => !value); setFollowLyrics(false); }}>↻ 循环</button></div>
             {audioName ? <p className="audio-name" title={audioName}>{audioName}</p> : <button className="upload-audio" onClick={() => fileRef.current?.click()}>上传歌曲音频</button>}
             <div className="subtitle-actions">
-              <button disabled={analyzing} onClick={() => subtitleRef.current?.click()}>{analyzing ? '识别中…' : '导入 SRT / STR'}</button>
+              <button disabled={analyzing} onClick={() => subtitleRef.current?.click()}>{analyzing ? '识别中…' : '导入 SRT / LRC'}</button>
               <button className={followLyrics ? 'on' : ''} onClick={() => { setFollowLyrics((value) => !value); setLooping(false); }}>↕ {followLyrics ? '正在跟随' : '跟随歌词'}</button>
             </div>
             {subtitleName && <p className="subtitle-name" title={subtitleName}>时间轴 · {subtitleName}</p>}

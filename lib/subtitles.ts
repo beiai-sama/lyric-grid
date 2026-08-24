@@ -49,6 +49,48 @@ export function parseSrt(value: string): SubtitleCue[] {
     .sort((left, right) => left.start - right.start);
 }
 
+function lrcTimestampToSeconds(match: RegExpMatchArray): number {
+  const hours = Number(match[1] ?? 0);
+  const minutes = Number(match[2] ?? 0);
+  const seconds = Number(match[3] ?? 0);
+  const fraction = match[4] ? Number(`0.${match[4]}`) : 0;
+  return hours * 3600 + minutes * 60 + seconds + fraction;
+}
+
+export function parseLrc(value: string): SubtitleCue[] {
+  const normalized = value.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const offsetMilliseconds = Number(normalized.match(/\[offset\s*:\s*([+-]?\d+)\s*\]/i)?.[1] ?? 0);
+  const grouped = new Map<number, { start: number; lines: string[] }>();
+  const timestampPattern = /\[(?:(\d{1,2}):)?(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+
+  normalized.split('\n').forEach((row) => {
+    const matches = Array.from(row.matchAll(timestampPattern));
+    if (!matches.length) return;
+    const lyric = cleanSubtitleLine(
+      row
+        .replace(timestampPattern, '')
+        .replace(/<(?:(?:\d{1,2}):)?\d{1,3}:\d{2}(?:[.:]\d{1,3})?>/g, ''),
+    );
+    if (!lyric) return;
+
+    matches.forEach((match) => {
+      const start = Math.max(0, lrcTimestampToSeconds(match) + offsetMilliseconds / 1000);
+      const key = Math.round(start * 1000);
+      const group = grouped.get(key) ?? { start, lines: [] };
+      if (!group.lines.includes(lyric)) group.lines.push(lyric);
+      grouped.set(key, group);
+    });
+  });
+
+  const groups = Array.from(grouped.values()).sort((left, right) => left.start - right.start);
+  return groups.map((group, index) => ({
+    index: index + 1,
+    start: group.start,
+    end: groups[index + 1]?.start ?? group.start + 5,
+    lines: group.lines,
+  }));
+}
+
 export function normalizeLyric(value: string): string {
   return value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 }
