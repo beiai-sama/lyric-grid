@@ -57,6 +57,7 @@ const seedLines: LyricLine[] = [
 
 const languageLabel = { ja: '日语', en: '英语', mixed: '日英混合' } as const;
 const storageKey = 'lyric-grid-project-v1';
+const tutorialStorageKey = 'lyric-grid-tutorial-dismissed-v1';
 const phoneticVersion = 2;
 
 function formatTime(value: number): string {
@@ -98,6 +99,8 @@ export default function Home() {
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [hideTutorialNextTime, setHideTutorialNextTime] = useState(false);
   const [notice, setNotice] = useState('');
   const [hydrated, setHydrated] = useState(false);
   const [audioUrl, setAudioUrl] = useState('');
@@ -172,7 +175,12 @@ export default function Home() {
           window.localStorage.removeItem(storageKey);
         }
       }
-      if (!cancelled) setHydrated(true);
+      if (!cancelled) {
+        const tutorialDismissed = window.localStorage.getItem(tutorialStorageKey) === '1';
+        setHideTutorialNextTime(tutorialDismissed);
+        setTutorialOpen(!tutorialDismissed);
+        setHydrated(true);
+      }
     })());
     return () => { cancelled = true; };
   }, []);
@@ -199,6 +207,17 @@ export default function Home() {
   const flash = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice(''), 1800);
+  };
+
+  const openTutorial = () => {
+    setHideTutorialNextTime(window.localStorage.getItem(tutorialStorageKey) === '1');
+    setTutorialOpen(true);
+  };
+
+  const closeTutorial = () => {
+    if (hideTutorialNextTime) window.localStorage.setItem(tutorialStorageKey, '1');
+    else window.localStorage.removeItem(tutorialStorageKey);
+    setTutorialOpen(false);
   };
 
   const startPronunciationEdit = () => {
@@ -495,6 +514,7 @@ export default function Home() {
           <span className="saved-label">{hydrated ? '已保存到本机' : '正在读取'}</span>
         </label>
         <div className="top-actions">
+          <button className="help-button" onClick={openTutorial} aria-label="打开新手教程"><span>？</span><b>新手教程</b></button>
           <button className="button button-quiet" onClick={() => setImportOpen(true)}>导入歌词</button>
           <button className="button button-quiet export-button" onClick={exportProject}>导出</button>
           <button className="button button-primary" onClick={() => setImportOpen(true)}>＋ 新建工程</button>
@@ -653,6 +673,34 @@ export default function Home() {
             <textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={'どうして どうして 私だけ\n乾燥し切った眼でlove-la-villain'} autoFocus />
             <div className="modal-help"><span>日语</span> 自动生成假名和分格罗马音 <span>英语</span> 自动生成 IPA，可按原唱修改</div>
             <div className="modal-actions"><button onClick={() => setImportOpen(false)}>取消</button><button className="analyze-button" disabled={!importText.trim() || analyzing} onClick={analyzeLyrics}>{analyzing ? '正在加载发音辞典…' : '分析歌词 →'}</button></div>
+          </section>
+        </div>
+      )}
+
+      {tutorialOpen && (
+        <div className="modal-backdrop tutorial-backdrop" role="presentation">
+          <section className="tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
+            <span className="tutorial-kicker">第一次来？别慌</span>
+            <h2 id="tutorial-title">一分钟学会词格</h2>
+            <p className="tutorial-lead">只记住一句：<strong>上面一个发音格，下面通常填一个中文字。</strong></p>
+
+            <div className="tutorial-demo" aria-label="一个连读发音格对应一个中文字">
+              <span className="tutorial-sound"><b>na+i</b><small>连读一格</small></span>
+              <span className="tutorial-arrow">→</span>
+              <span className="tutorial-character">你</span>
+            </div>
+
+            <ol className="tutorial-steps">
+              <li><span>1</span><p><strong>粘贴原歌词</strong><small>点“新建工程”，一句放一行，罗马音会自动出来。</small></p></li>
+              <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
+              <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。想拖长就加“—”，想多唱一字就“拆一格”。</small></p></li>
+              <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>
+            </ol>
+
+            <div className="tutorial-footer">
+              <label><input type="checkbox" checked={hideTutorialNextTime} onChange={(event) => setHideTutorialNextTime(event.target.checked)} /> 下次打开不再自动显示</label>
+              <button onClick={closeTutorial}>我会啦，开始填词 →</button>
+            </div>
           </section>
         </div>
       )}

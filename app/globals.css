@@ -36,6 +36,9 @@ button { color: inherit; }
 .status-dot { width: 7px; height: 7px; background: var(--lime); border-radius: 50%; box-shadow: 0 0 12px rgba(200, 243, 107, .7); }
 .saved-label { color: #5f6a65; padding-left: 8px; border-left: 1px solid var(--line); }
 .top-actions { display: flex; gap: 8px; }
+.help-button { height: 36px; border: 1px solid #35413c; border-radius: 9px; padding: 0 11px; background: #182022; color: #aeb8b3; display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 10px; }
+.help-button span { width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center; background: #29351f; color: var(--lime); font-weight: 900; }
+.help-button b { font-weight: 700; }
 .button, .icon-button, .text-button, .mini-toolbar button, .transport button, .upload-audio, .add-cell { border: 0; cursor: pointer; }
 .button { height: 36px; border-radius: 9px; padding: 0 14px; font-size: 12px; font-weight: 700; }
 .button-quiet { background: #1c2325; border: 1px solid var(--line); color: #d6dcd8; }
@@ -182,6 +185,28 @@ button { color: inherit; }
 .modal-actions button { height: 38px; border: 1px solid var(--line); border-radius: 9px; background: #1b2325; color: #909b95; padding: 0 15px; font-size: 11px; cursor: pointer; }
 .modal-actions .analyze-button { min-width: 145px; border: 0; background: var(--lime); color: #11170f; font-weight: 800; }
 .modal-actions .analyze-button:disabled { opacity: .45; cursor: wait; }
+.tutorial-backdrop { z-index: 50; }
+.tutorial-modal { width: min(650px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; border: 1px solid #46543e; border-radius: 22px; background: radial-gradient(circle at 90% 0, rgba(200, 243, 107, .1), transparent 32%), #151b1d; padding: 28px; box-shadow: 0 35px 120px rgba(0, 0, 0, .58); }
+.tutorial-kicker { color: var(--lime); font-size: 9px; font-weight: 850; letter-spacing: .12em; }
+.tutorial-modal h2 { margin: 7px 0 5px; font-size: 26px; }
+.tutorial-lead { margin: 0; color: #89958f; font-size: 12px; line-height: 1.7; }
+.tutorial-lead strong { color: #eaf0e8; }
+.tutorial-demo { margin: 18px 0; display: flex; align-items: center; justify-content: center; gap: 15px; padding: 15px; border: 1px solid #2e3b37; border-radius: 14px; background: #101719; }
+.tutorial-sound { width: 100px; height: 64px; border: 1px solid #36746f; border-radius: 11px; background: #1d302f; color: var(--cyan); display: grid; place-items: center; align-content: center; gap: 4px; }
+.tutorial-sound b { font: 700 16px ui-monospace, "Cascadia Code", monospace; }
+.tutorial-sound small { color: #74bab5; font-size: 8px; }
+.tutorial-arrow { color: var(--lime); font-size: 22px; }
+.tutorial-character { width: 64px; height: 64px; border: 1px solid var(--lime); border-radius: 11px; background: linear-gradient(180deg, #29352d, #202825); display: grid; place-items: center; color: #f4f8f0; font-size: 24px; }
+.tutorial-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.tutorial-steps li { min-width: 0; display: flex; gap: 10px; padding: 12px; border: 1px solid #293334; border-radius: 12px; background: rgba(17, 23, 25, .7); }
+.tutorial-steps li > span { flex: 0 0 25px; height: 25px; border-radius: 8px; display: grid; place-items: center; background: #26331f; color: var(--lime); font: 800 10px ui-monospace, monospace; }
+.tutorial-steps p { margin: 0; display: grid; gap: 4px; }
+.tutorial-steps strong { color: #dce3de; font-size: 11px; }
+.tutorial-steps small { color: #77837d; font-size: 9px; line-height: 1.55; }
+.tutorial-footer { margin-top: 18px; padding-top: 15px; border-top: 1px solid #293233; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.tutorial-footer label { color: #7e8984; font-size: 9px; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.tutorial-footer input { accent-color: var(--lime); }
+.tutorial-footer button { height: 38px; border: 0; border-radius: 9px; padding: 0 15px; background: var(--lime); color: #11170f; font-size: 10px; font-weight: 850; cursor: pointer; }
 .toast { position: fixed; left: 50%; bottom: 26px; z-index: 60; transform: translateX(-50%); border: 1px solid #48563f; border-radius: 999px; background: #202b20; color: #dcf1bb; padding: 10px 16px; box-shadow: 0 12px 40px rgba(0,0,0,.35); font-size: 11px; }
 
 @media (max-width: 1180px) { .workspace { grid-template-columns: 240px minmax(580px, 1fr); } .listen-panel { display: none; } }
@@ -189,6 +214,8 @@ button { color: inherit; }
   .app-shell { min-height: 100vh; height: auto; overflow: visible; }
   .topbar { grid-template-columns: 1fr auto; padding: 0 14px; }
   .project-title, .button-quiet, .brand-en { display: none; }
+  .help-button { width: 36px; padding: 0; justify-content: center; }
+  .help-button b { display: none; }
   .workspace { display: block; height: auto; min-height: calc(100vh - 68px); overflow: visible; }
   .line-panel { display: none; }
   .editor-panel { overflow: visible; padding: 24px 14px 50px; }
@@ -199,6 +226,9 @@ button { color: inherit; }
   .mini-toolbar { display: none; }
   .change-ledger { align-items: start; flex-wrap: wrap; }
   .balanced { margin-left: 0; }
+  .tutorial-modal { padding: 22px 16px; }
+  .tutorial-steps { grid-template-columns: 1fr; }
+  .tutorial-footer { align-items: stretch; flex-direction: column; }
 }
 @media (prefers-reduced-motion: no-preference) {
   .phoneme-token, .lyric-cell, .line-item, button { transition: border-color .18s ease, background .18s ease, transform .18s ease; }
