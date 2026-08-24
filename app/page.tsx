@@ -1,6 +1,6 @@
 'use client';
 
-import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { CSSProperties, ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ParsedLyricLine,
   PronunciationToken,
@@ -39,6 +39,43 @@ type PendingSvpImport = {
   maximumSyllables: number;
 };
 
+type ThemeConfig = {
+  accent: string;
+  background: string;
+  panel: string;
+  backgroundImage: string;
+  backgroundName: string;
+  backgroundOpacity: number;
+};
+
+type AiTask = 'translate' | 'rhyme' | 'imagery' | 'music';
+
+type AiConfig = {
+  endpoint: string;
+  model: string;
+};
+
+const defaultTheme: ThemeConfig = {
+  accent: '#c8f36b',
+  background: '#0d1214',
+  panel: '#151b1d',
+  backgroundImage: '',
+  backgroundName: '',
+  backgroundOpacity: 0.2,
+};
+
+const defaultAiConfig: AiConfig = {
+  endpoint: 'https://open.bigmodel.cn/api/paas/v4',
+  model: 'glm-4.7-flash',
+};
+
+const aiTaskLabels: Record<AiTask, { title: string; note: string }> = {
+  translate: { title: '日语直译', note: '忠实解释原意，不按字数适配' },
+  rhyme: { title: '韵脚方向', note: '找韵母和单词素材，不写成品句' },
+  imagery: { title: '意象隐喻', note: '梳理画面、叙事和关键词' },
+  music: { title: '音乐背景', note: '从文本推测情绪和演唱口吻' },
+};
+
 const token = (
   id: string,
   label: string,
@@ -73,6 +110,8 @@ const seedLines: LyricLine[] = [
 const languageLabel = { ja: '日语', en: '英语', mixed: '日英混合', zh: '中文' } as const;
 const storageKey = 'lyric-grid-project-v1';
 const tutorialStorageKey = 'lyric-grid-tutorial-dismissed-v1';
+const themeStorageKey = 'lyric-grid-theme-v1';
+const aiStorageKey = 'lyric-grid-ai-config-v1';
 const phoneticVersion = 2;
 
 function formatTime(value: number): string {
@@ -103,6 +142,30 @@ async function readLyricFile(file: File): Promise<string> {
   }
 }
 
+async function compressBackground(file: File): Promise<string> {
+  if (!file.type.startsWith('image/')) throw new Error('请选择图片文件');
+  if (file.size > 12 * 1024 * 1024) throw new Error('背景图片请控制在 12MB 以内');
+  const source = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error('这张图片无法读取'));
+      image.src = source;
+    });
+    const scale = Math.min(1, 1920 / image.naturalWidth, 1200 / image.naturalHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('浏览器无法处理这张图片');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/webp', 0.78);
+  } finally {
+    URL.revokeObjectURL(source);
+  }
+}
+
 export default function Home() {
   const [lines, setLines] = useState<LyricLine[]>(seedLines);
   const [activeId, setActiveId] = useState('sample-3');
@@ -117,6 +180,18 @@ export default function Home() {
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [hideTutorialNextTime, setHideTutorialNextTime] = useState(false);
   const [svpImport, setSvpImport] = useState<PendingSvpImport | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewShowPronunciation, setPreviewShowPronunciation] = useState(true);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [theme, setTheme] = useState<ThemeConfig>(defaultTheme);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiConfig, setAiConfig] = useState<AiConfig>(defaultAiConfig);
+  const [aiKey, setAiKey] = useState('');
+  const [aiTask, setAiTask] = useState<AiTask>('translate');
+  const [aiScope, setAiScope] = useState<'current' | 'all'>('current');
+  const [aiFocus, setAiFocus] = useState('');
+  const [aiResult, setAiResult] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
   const [notice, setNotice] = useState('');
   const [hydrated, setHydrated] = useState(false);
   const [audioUrl, setAudioUrl] = useState('');
@@ -132,6 +207,7 @@ export default function Home() {
   const fileRef = useRef<HTMLInputElement>(null);
   const subtitleRef = useRef<HTMLInputElement>(null);
   const svpRef = useRef<HTMLInputElement>(null);
+  const backgroundRef = useRef<HTMLInputElement>(null);
   const editorPanelRef = useRef<HTMLElement>(null);
   const lineButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
@@ -150,6 +226,22 @@ export default function Home() {
     () => new Map(lines.map((line) => [line.id, analyzeChineseCells(line.target).rhyme])),
     [lines],
   );
+  const previewStats = useMemo(() => {
+    const completed = lines.filter((line) => line.target.some((cell) => cell.trim() && cell !== '—')).length;
+    const rhymeCounts = new Map<string, number>();
+    lineRhymes.forEach((rhyme) => {
+      if (rhyme?.final) rhymeCounts.set(rhyme.final, (rhymeCounts.get(rhyme.final) ?? 0) + 1);
+    });
+    const commonRhymes = [...rhymeCounts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 4);
+    return { completed, commonRhymes };
+  }, [lineRhymes, lines]);
+  const themeStyle = useMemo(() => ({
+    '--lime': theme.accent,
+    '--background': theme.background,
+    '--panel': theme.panel,
+    '--custom-bg-image': theme.backgroundImage ? `url(${JSON.stringify(theme.backgroundImage)})` : 'none',
+    '--custom-bg-opacity': String(theme.backgroundOpacity),
+  }) as CSSProperties, [theme]);
   const activeSvpPitchRange = useMemo(() => {
     const pitches = activeLine?.svp?.notes.map((note) => note.pitch) ?? [];
     return {
@@ -207,6 +299,22 @@ export default function Home() {
           window.localStorage.removeItem(storageKey);
         }
       }
+      const savedTheme = window.localStorage.getItem(themeStorageKey);
+      if (savedTheme) {
+        try {
+          setTheme({ ...defaultTheme, ...JSON.parse(savedTheme) as Partial<ThemeConfig> });
+        } catch {
+          window.localStorage.removeItem(themeStorageKey);
+        }
+      }
+      const savedAiConfig = window.localStorage.getItem(aiStorageKey);
+      if (savedAiConfig) {
+        try {
+          setAiConfig({ ...defaultAiConfig, ...JSON.parse(savedAiConfig) as Partial<AiConfig> });
+        } catch {
+          window.localStorage.removeItem(aiStorageKey);
+        }
+      }
       if (!cancelled) {
         const tutorialDismissed = window.localStorage.getItem(tutorialStorageKey) === '1';
         setHideTutorialNextTime(tutorialDismissed);
@@ -221,6 +329,20 @@ export default function Home() {
     if (!hydrated) return;
     window.localStorage.setItem(storageKey, JSON.stringify({ phoneticVersion, title: projectTitle, lines, activeId }));
   }, [activeId, hydrated, lines, projectTitle]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      window.localStorage.setItem(themeStorageKey, JSON.stringify(theme));
+    } catch {
+      console.warn('The custom background is too large for localStorage and will only remain visible in this session.');
+    }
+  }, [hydrated, theme]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    window.localStorage.setItem(aiStorageKey, JSON.stringify(aiConfig));
+  }, [aiConfig, hydrated]);
 
   useEffect(() => () => {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
@@ -571,6 +693,71 @@ export default function Home() {
     flash('项目文件已导出');
   };
 
+  const handleBackground = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = '';
+    try {
+      const backgroundImage = await compressBackground(file);
+      setTheme((current) => ({ ...current, backgroundImage, backgroundName: file.name }));
+      flash('背景只保存在这台设备');
+    } catch (error) {
+      flash(error instanceof Error ? error.message : '背景图片读取失败');
+    }
+  };
+
+  const applyThemePreset = (accent: string, background: string, panel: string) => {
+    setTheme((current) => ({ ...current, accent, background, panel }));
+  };
+
+  const runAiAssistant = async () => {
+    if (!aiKey.trim()) {
+      flash('先填入自己的智谱 API Key');
+      return;
+    }
+    setAiLoading(true);
+    setAiResult('');
+    try {
+      const selectedLines = aiScope === 'all' ? lines : [activeLine];
+      const response = await fetch('/api/ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: aiKey,
+          endpoint: aiConfig.endpoint,
+          model: aiConfig.model,
+          task: aiTask,
+          scope: aiScope,
+          projectTitle,
+          focus: aiFocus,
+          lyrics: selectedLines.map((line) => {
+            const rhyme = lineRhymes.get(line.id);
+            return {
+              index: lines.findIndex((candidate) => candidate.id === line.id) + 1,
+              source: line.source,
+              pronunciation: line.tokens.map((item) => item.label).join(' '),
+              target: line.target.filter((cell) => cell !== '—').join(''),
+              rhyme: rhyme?.final ?? '',
+            };
+          }),
+        }),
+      });
+      const result = await response.json() as { content?: string; error?: string };
+      if (!response.ok || !result.content) throw new Error(result.error || 'AI 暂时没有返回结果');
+      setAiResult(result.content);
+    } catch (error) {
+      setAiResult(`没有完成分析：${error instanceof Error ? error.message : '请检查接口配置'}`);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const copyAiResult = async () => {
+    if (!aiResult) return;
+    await navigator.clipboard.writeText(aiResult);
+    flash('AI 建议已复制，不会写进词格');
+  };
+
   const pronunciationLabel = useMemo(
     () => activeLine?.tokens.map((item) => item.label).join(' ') ?? '',
     [activeLine],
@@ -579,8 +766,9 @@ export default function Home() {
   if (!activeLine) return null;
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" style={themeStyle}>
       <input ref={svpRef} type="file" accept=".svp,application/json" onChange={handleSvp} hidden />
+      <input ref={backgroundRef} type="file" accept="image/*" onChange={handleBackground} hidden />
       <header className="topbar">
         <div className="brand" aria-label="词格 Lyric Grid">
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
@@ -594,6 +782,9 @@ export default function Home() {
         </label>
         <div className="top-actions">
           <button className="help-button" onClick={openTutorial} aria-label="打开新手教程"><span>？</span><b>新手教程</b></button>
+          <button className="button button-quiet" onClick={() => setPreviewOpen(true)}>全局预览</button>
+          <button className="button button-ai" onClick={() => setAiOpen(true)}>✦ AI 参谋</button>
+          <button className="button button-quiet" onClick={() => setAppearanceOpen(true)}>外观</button>
           <button className="button button-quiet" onClick={() => svpRef.current?.click()}>导入 SVP β</button>
           <button className="button button-quiet" onClick={() => setImportOpen(true)}>导入歌词</button>
           <button className="button button-quiet export-button" onClick={exportProject}>导出</button>
@@ -774,6 +965,123 @@ export default function Home() {
         </aside>
       </div>
 
+      {previewOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewOpen(false); }}>
+          <section className="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+            <button className="modal-close" aria-label="关闭全局预览" onClick={() => setPreviewOpen(false)}>×</button>
+            <div className="preview-header">
+              <div><span className="eyebrow">整首翻填总览</span><h2 id="preview-title">{projectTitle}</h2><p>从头看到尾，检查字数、句尾和整体押韵。</p></div>
+              <div className="preview-stats"><span><b>{lines.length}</b> 句</span><span><b>{previewStats.completed}</b> 已填</span><span><b>{lines.length - previewStats.completed}</b> 待填</span></div>
+            </div>
+            <div className="preview-toolbar">
+              <label><input type="checkbox" checked={previewShowPronunciation} onChange={(event) => setPreviewShowPronunciation(event.target.checked)} /> 显示发音与拼音</label>
+              <div className="preview-rhymes">
+                <span>常用韵脚</span>
+                {previewStats.commonRhymes.length
+                  ? previewStats.commonRhymes.map(([rhyme, count]) => <b key={rhyme}>{rhyme} · {count}</b>)
+                  : <small>填几句中文后自动汇总</small>}
+              </div>
+              <button onClick={copyLyrics}>复制中文歌词</button>
+            </div>
+            <div className="preview-list">
+              {lines.map((line, index) => {
+                const chinese = analyzeChineseCells(line.target);
+                const target = line.target.map((cell) => cell || '□').join('');
+                const hasDraft = line.target.some((cell) => cell.trim() && cell !== '—');
+                return (
+                  <button className={`preview-line ${line.id === activeId ? 'active' : ''}`} key={line.id} onClick={() => { setActiveId(line.id); setSelectedCell(0); setPreviewOpen(false); }}>
+                    <span className="preview-line-index">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="preview-line-body">
+                      <span className="preview-source" lang="ja">{line.source}</span>
+                      {previewShowPronunciation && <small className="preview-pronunciation">{line.tokens.map((item) => item.label).join(' ')}</small>}
+                      <strong className={hasDraft ? '' : 'empty'}>{target}</strong>
+                      {previewShowPronunciation && hasDraft && <small className="preview-pinyin">{chinese.cells.map((cell) => cell?.syllable ?? '·').join(' ')}</small>}
+                    </span>
+                    <span className="preview-line-meta">
+                      {line.start != null && <small>{formatTime(line.start)}</small>}
+                      <b>{baseCount(line.tokens)} 字</b>
+                      {chinese.rhyme?.final && <em>{chinese.rhyme.final} 韵</em>}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      )}
+
+      {appearanceOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAppearanceOpen(false); }}>
+          <section className="appearance-modal" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
+            <button className="modal-close" aria-label="关闭外观设置" onClick={() => setAppearanceOpen(false)}>×</button>
+            <span className="eyebrow">只装饰你的工作台</span>
+            <h2 id="appearance-title">自定义配色与背景</h2>
+            <p>颜色和图片仅保存在这台设备，不会上传。</p>
+
+            <div className="theme-presets" aria-label="主题预设">
+              <button className="theme-preset lime" onClick={() => applyThemePreset('#c8f36b', '#0d1214', '#151b1d')}><i /><span>酸橙夜</span></button>
+              <button className="theme-preset sakura" onClick={() => applyThemePreset('#ff91bb', '#130f15', '#1c161f')}><i /><span>樱花黑</span></button>
+              <button className="theme-preset ocean" onClick={() => applyThemePreset('#66e2dc', '#091315', '#101d20')}><i /><span>深海青</span></button>
+              <button className="theme-preset violet" onClick={() => applyThemePreset('#b99cff', '#100e17', '#191624')}><i /><span>夜紫</span></button>
+            </div>
+
+            <div className="color-controls">
+              <label><span>强调色</span><input type="color" value={theme.accent} onChange={(event) => setTheme((current) => ({ ...current, accent: event.target.value }))} /><code>{theme.accent}</code></label>
+              <label><span>底色</span><input type="color" value={theme.background} onChange={(event) => setTheme((current) => ({ ...current, background: event.target.value }))} /><code>{theme.background}</code></label>
+              <label><span>卡片色</span><input type="color" value={theme.panel} onChange={(event) => setTheme((current) => ({ ...current, panel: event.target.value }))} /><code>{theme.panel}</code></label>
+            </div>
+
+            <div className="background-setting">
+              <div className="background-preview" style={{ backgroundImage: theme.backgroundImage ? `url(${JSON.stringify(theme.backgroundImage)})` : undefined }}><span>{theme.backgroundImage ? '当前背景' : '还没有背景图'}</span></div>
+              <div>
+                <strong>自定义背景图片</strong>
+                <small>{theme.backgroundName || '支持常见图片格式，自动压缩后保存在浏览器'}</small>
+                <span><button onClick={() => backgroundRef.current?.click()}>选择图片</button>{theme.backgroundImage && <button className="quiet" onClick={() => setTheme((current) => ({ ...current, backgroundImage: '', backgroundName: '' }))}>移除</button>}</span>
+              </div>
+            </div>
+            <label className="opacity-control"><span>背景可见度 <b>{Math.round(theme.backgroundOpacity * 100)}%</b></span><input type="range" min="0.05" max="0.65" step="0.05" value={theme.backgroundOpacity} onChange={(event) => setTheme((current) => ({ ...current, backgroundOpacity: Number(event.target.value) }))} /></label>
+            <div className="modal-actions"><button onClick={() => setTheme(defaultTheme)}>恢复默认</button><button className="analyze-button" onClick={() => setAppearanceOpen(false)}>应用外观</button></div>
+          </section>
+        </div>
+      )}
+
+      {aiOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-title">
+            <button className="modal-close" aria-label="关闭 AI 参谋" onClick={() => setAiOpen(false)}>×</button>
+            <div className="ai-heading"><span className="ai-mark">✦</span><div><span className="eyebrow">GLM-4.7 创作研究助手</span><h2 id="ai-title">给你线索，不替你写</h2><p>可以直译、找韵脚、分析意象和音乐背景；结果不会自动进入中文词格。</p></div></div>
+
+            <div className="ai-layout">
+              <div className="ai-controls">
+                <div className="ai-task-list">
+                  {(Object.entries(aiTaskLabels) as Array<[AiTask, { title: string; note: string }]>).map(([task, copy]) => (
+                    <button className={aiTask === task ? 'selected' : ''} key={task} onClick={() => { setAiTask(task); setAiResult(''); }}><b>{copy.title}</b><small>{copy.note}</small></button>
+                  ))}
+                </div>
+                <div className="ai-scope"><span>分析范围</span><button className={aiScope === 'current' ? 'selected' : ''} onClick={() => setAiScope('current')}>当前第 {activeIndex + 1} 句</button><button className={aiScope === 'all' ? 'selected' : ''} onClick={() => setAiScope('all')}>整首 {lines.length} 句</button></div>
+                <label className="ai-focus"><span>特别想了解什么？<small>可不填</small></span><textarea value={aiFocus} onChange={(event) => setAiFocus(event.target.value)} placeholder="例如：这句的主语是谁？有没有宗教隐喻？" /></label>
+              </div>
+
+              <div className="ai-output">
+                {aiResult ? <pre>{aiResult}</pre> : <div className="ai-empty"><span>✦</span><b>{aiTaskLabels[aiTask].title}</b><p>{aiTaskLabels[aiTask].note}。AI 不会提供可直接粘进格子的中文歌词。</p></div>}
+                {aiResult && <button className="copy-ai" onClick={copyAiResult}>复制这份建议</button>}
+              </div>
+            </div>
+
+            <details className="ai-config" open={!aiKey}>
+              <summary>配置自己的智谱接口</summary>
+              <div>
+                <label><span>API Key</span><input type="password" value={aiKey} onChange={(event) => setAiKey(event.target.value)} placeholder="只在当前页面内存中使用" autoComplete="off" /></label>
+                <label><span>模型</span><select value={aiConfig.model} onChange={(event) => setAiConfig((current) => ({ ...current, model: event.target.value }))}><option value="glm-4.7-flash">glm-4.7-flash（免费）</option><option value="glm-4.7-flashx">glm-4.7-flashx</option><option value="glm-4.7">glm-4.7</option></select></label>
+                <label className="ai-endpoint"><span>官方接口地址</span><input value={aiConfig.endpoint} onChange={(event) => setAiConfig((current) => ({ ...current, endpoint: event.target.value }))} /></label>
+              </div>
+              <p>Key 不会写入本机存储，刷新页面后需要重新填写；目前仅连接智谱官方域名。</p>
+            </details>
+            <div className="ai-footer"><span>护栏：禁止逐格代写、成品歌词和假装听过本机音频</span><button disabled={aiLoading} onClick={runAiAssistant}>{aiLoading ? 'GLM 正在整理线索…' : `开始${aiTaskLabels[aiTask].title} →`}</button></div>
+          </section>
+        </div>
+      )}
+
       {importOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !analyzing) setImportOpen(false); }}>
           <section className="import-modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
@@ -835,6 +1143,7 @@ export default function Home() {
               <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
               <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。格子下方会显示拼音，句尾会告诉你是什么韵。</small></p></li>
               <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>
+              <li><span>5</span><p><strong>从全局看看整首歌</strong><small>“全局预览”检查整首押韵；“AI 参谋”只帮你查意思和找灵感，不会替你填格子。</small></p></li>
             </ol>
 
             <div className="tutorial-footer">
