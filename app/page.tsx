@@ -16,6 +16,7 @@ import {
   recognizeSubtitleText,
   targetTextToCells,
 } from '../lib/subtitles';
+import { analyzeChineseCells } from '../lib/chinese';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -125,6 +126,14 @@ export default function Home() {
     ? activeLine.target.filter((cell) => cell.trim() && cell !== '—').length
     : 0;
   const delta = currentCount - suggestedCount;
+  const chinesePronunciation = useMemo(
+    () => analyzeChineseCells(activeLine?.target ?? []),
+    [activeLine],
+  );
+  const lineRhymes = useMemo(
+    () => new Map(lines.map((line) => [line.id, analyzeChineseCells(line.target).rhyme])),
+    [lines],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -531,6 +540,7 @@ export default function Home() {
             {lines.map((line, index) => {
               const count = baseCount(line.tokens);
               const filled = line.target.some((cell) => cell && cell !== '—');
+              const rhyme = lineRhymes.get(line.id);
               return (
                 <button
                   className={`line-item ${line.id === activeId ? 'active' : ''}`}
@@ -542,7 +552,7 @@ export default function Home() {
                   onClick={() => { setActiveId(line.id); setSelectedCell(0); }}
                 >
                   <span className="line-index">{String(index + 1).padStart(2, '0')}</span>
-                  <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}</small></span>
+                  <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}{rhyme?.final && <em> · {rhyme.final} 韵</em>}</small></span>
                   <span className="line-count">{count}<small>字</small></span>
                 </button>
               );
@@ -601,7 +611,7 @@ export default function Home() {
 
           <section className="editor-section target-section">
             <div className="section-title-row">
-              <div><span className="step-number">02</span><h2>中文填词</h2><p>可直接粘贴整句；延音不计入当前字数</p></div>
+              <div><span className="step-number">02</span><h2>中文填词</h2><p>填字后显示拼音；句尾自动标出韵脚</p></div>
               <div className="mini-toolbar" aria-label="编辑工具">
                 <button onClick={mergeCell}>合并为延音</button>
                 <button onClick={splitCell}>拆一格</button>
@@ -612,7 +622,7 @@ export default function Home() {
 
             <div className="lyric-grid" aria-label="中文逐格编辑器">
               {activeLine.target.map((cell, index) => (
-                <label className={`lyric-cell ${cell === '—' ? 'sustain' : ''} ${selectedCell === index ? 'selected' : ''}`} key={`${activeLine.id}-${index}`} onClick={() => setSelectedCell(index)}>
+                <label className={`lyric-cell ${cell === '—' ? 'sustain' : ''} ${chinesePronunciation.cells[index]?.rhyme ? 'rhyme' : ''} ${selectedCell === index ? 'selected' : ''}`} key={`${activeLine.id}-${index}`} onClick={() => setSelectedCell(index)}>
                   <span>{String(index + 1).padStart(2, '0')}</span>
                   <input
                     aria-label={`第 ${index + 1} 格`}
@@ -625,6 +635,7 @@ export default function Home() {
                       if (event.key === 'ArrowLeft') setSelectedCell(Math.max(index - 1, 0));
                     }}
                   />
+                  {chinesePronunciation.cells[index] && <small className="cell-pinyin">{chinesePronunciation.cells[index]?.syllable}</small>}
                 </label>
               ))}
               <button className="add-cell" aria-label="添加一格" onClick={splitCell}>＋</button>
@@ -633,6 +644,7 @@ export default function Home() {
             <div className="change-ledger">
               <div><span className={delta < 0 ? 'minus' : 'neutral'}>{delta < 0 ? delta : '—'}</span><p><strong>延音与合并</strong><small>少起一个中文读音</small></p></div>
               <div><span className={delta > 0 ? 'plus' : 'neutral'}>{delta > 0 ? `＋${delta}` : '—'}</span><p><strong>拆音设计</strong><small>在长音里增加落字</small></p></div>
+              {chinesePronunciation.rhyme && <span className="rhyme-badge">韵脚 <b>{chinesePronunciation.rhyme.character}</b> · {chinesePronunciation.rhyme.syllable} · <strong>{chinesePronunciation.rhyme.final} 韵</strong></span>}
               <span className={`balanced ${delta !== 0 ? 'shifted' : ''}`}>{delta === 0 ? '当前与基础建议持平' : delta > 0 ? `当前比建议多 ${delta} 字` : `当前比建议少 ${Math.abs(delta)} 字`}</span>
             </div>
           </section>
@@ -693,7 +705,7 @@ export default function Home() {
             <ol className="tutorial-steps">
               <li><span>1</span><p><strong>粘贴原歌词</strong><small>点“新建工程”，一句放一行，罗马音会自动出来。</small></p></li>
               <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
-              <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。想拖长就加“—”，想多唱一字就“拆一格”。</small></p></li>
+              <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。格子下方会显示拼音，句尾会告诉你是什么韵。</small></p></li>
               <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>
             </ol>
 

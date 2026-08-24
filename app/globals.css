@@ -61,6 +61,7 @@ button { color: inherit; }
 .line-copy { display: grid; gap: 8px; min-width: 0; }
 .line-copy > span { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #d7ded9; }
 .line-copy small, .line-count small { color: #69756f; font-size: 10px; }
+.line-copy small em { color: #65a7a2; font-style: normal; }
 .line-count { color: var(--lime); font-size: 18px; font-weight: 700; display: flex; align-items: baseline; gap: 2px; }
 .local-note { margin: auto 16px 18px; display: flex; gap: 10px; border-top: 1px solid var(--line); padding-top: 16px; color: #6d7873; }
 .local-note p { margin: 0; font-size: 10px; line-height: 1.6; }
@@ -118,6 +119,10 @@ button { color: inherit; }
 .lyric-cell { min-width: 58px; height: 72px; border: 1px solid #415046; background: linear-gradient(180deg, #26312b, #202825); border-radius: 10px; position: relative; overflow: hidden; }
 .lyric-cell > span { position: absolute; left: 6px; top: 5px; color: #65716a; font-size: 7px; font-family: ui-monospace, monospace; }
 .lyric-cell input { width: 100%; height: 100%; border: 0; outline: 0; background: transparent; color: #f3f7ef; text-align: center; font-size: 21px; padding-top: 8px; }
+.lyric-cell .cell-pinyin { position: absolute; left: 3px; right: 3px; bottom: 5px; color: #7f9288; font: 8px ui-monospace, "Cascadia Code", monospace; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.lyric-cell.rhyme { border-color: #397b75; box-shadow: inset 0 -2px 0 rgba(117, 222, 215, .18); }
+.lyric-cell.rhyme .cell-pinyin { color: var(--cyan); }
+.lyric-cell:has(.cell-pinyin) input { padding: 5px 3px 17px; }
 .lyric-cell:focus-within { border-color: var(--lime); box-shadow: 0 0 0 2px rgba(200, 243, 107, .1); }
 .lyric-cell.selected { border-color: var(--lime); box-shadow: 0 0 0 2px rgba(200, 243, 107, .09); }
 .lyric-cell.sustain { border-style: dashed; border-color: #536059; background: #171e1f; }
@@ -134,6 +139,9 @@ button { color: inherit; }
 .plus { background: #22302a; color: var(--cyan); }
 .balanced { margin-left: auto; border-radius: 999px; padding: 6px 9px; background: #22301e; color: var(--lime); font-size: 8px; }
 .balanced.shifted { background: #2b281f; color: var(--amber); }
+.rhyme-badge { border: 1px solid #315e5a; border-radius: 999px; padding: 5px 8px; background: #192827; color: #86aaa6; font-size: 8px; white-space: nowrap; }
+.rhyme-badge b { color: #edf4f0; font-size: 10px; }
+.rhyme-badge strong { color: var(--cyan); font-weight: 750; }
 
 .listen-heading h2 { margin: 0 0 20px; font-size: 16px; }
 .audio-card, .legend-card, .tip-card { border: 1px solid var(--line); background: #151b1d; border-radius: 15px; padding: 16px; margin-bottom: 12px; }
