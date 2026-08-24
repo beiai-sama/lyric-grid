@@ -16,7 +16,7 @@ export type ParsedLyricLine = {
   source: string;
   kana: string;
   tokens: PronunciationToken[];
-  language: 'ja' | 'en' | 'mixed';
+  language: 'ja' | 'en' | 'mixed' | 'zh';
   uncertain: boolean;
 };
 
@@ -286,7 +286,7 @@ function splitSegments(value: string): string[] {
 }
 
 export async function parseLyricLine(source: string, lineIndex = 0): Promise<ParsedLyricLine> {
-  const analyzer = await getAnalyzer();
+  let analyzer: Analyzer | undefined;
   const segments = splitSegments(source);
   const tokens: PronunciationToken[] = [];
   const kanaParts: string[] = [];
@@ -310,6 +310,7 @@ export async function parseLyricLine(source: string, lineIndex = 0): Promise<Par
 
     if (!/[\u3040-\u30ff\u3400-\u9fff]/.test(segment)) continue;
     hasJapanese = true;
+    analyzer ??= await getAnalyzer();
     const rows = await analyzer.parse(segment);
     rows.forEach((row, rowIndex) => {
       const kanaSurface = /^[\u3040-\u30ffー]+$/.test(row.surface_form) ? row.surface_form : undefined;

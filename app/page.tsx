@@ -17,12 +17,26 @@ import {
   targetTextToCells,
 } from '../lib/subtitles';
 import { analyzeChineseCells } from '../lib/chinese';
+import {
+  SvpLineMeta,
+  SvpProject,
+  importSvpTrack,
+  parseSvpProject,
+} from '../lib/svp';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
   target: string[];
   start?: number;
   end?: number;
+  svp?: SvpLineMeta;
+};
+
+type PendingSvpImport = {
+  fileName: string;
+  project: SvpProject;
+  trackId: string;
+  maximumSyllables: number;
 };
 
 const token = (
@@ -56,7 +70,7 @@ const seedLines: LyricLine[] = [
   },
 ];
 
-const languageLabel = { ja: '日语', en: '英语', mixed: '日英混合' } as const;
+const languageLabel = { ja: '日语', en: '英语', mixed: '日英混合', zh: '中文' } as const;
 const storageKey = 'lyric-grid-project-v1';
 const tutorialStorageKey = 'lyric-grid-tutorial-dismissed-v1';
 const phoneticVersion = 2;
@@ -102,6 +116,7 @@ export default function Home() {
   const [analyzing, setAnalyzing] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [hideTutorialNextTime, setHideTutorialNextTime] = useState(false);
+  const [svpImport, setSvpImport] = useState<PendingSvpImport | null>(null);
   const [notice, setNotice] = useState('');
   const [hydrated, setHydrated] = useState(false);
   const [audioUrl, setAudioUrl] = useState('');
@@ -116,6 +131,7 @@ export default function Home() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const subtitleRef = useRef<HTMLInputElement>(null);
+  const svpRef = useRef<HTMLInputElement>(null);
   const editorPanelRef = useRef<HTMLElement>(null);
   const lineButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
@@ -134,6 +150,13 @@ export default function Home() {
     () => new Map(lines.map((line) => [line.id, analyzeChineseCells(line.target).rhyme])),
     [lines],
   );
+  const activeSvpPitchRange = useMemo(() => {
+    const pitches = activeLine?.svp?.notes.map((note) => note.pitch) ?? [];
+    return {
+      minimum: pitches.length ? Math.min(...pitches) : 60,
+      maximum: pitches.length ? Math.max(...pitches) : 60,
+    };
+  }, [activeLine]);
 
   useEffect(() => {
     let cancelled = false;
@@ -450,6 +473,52 @@ export default function Home() {
     }
   };
 
+  const handleSvp = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = '';
+    if (file.size > 20 * 1024 * 1024) {
+      flash('这个 SVP 太大了，请先精简到 20MB 以内');
+      return;
+    }
+    try {
+      const project = parseSvpProject(await file.text());
+      const defaultTrack = project.tracks.reduce((best, track) => track.notes.length > best.notes.length ? track : best);
+      setSvpImport({ fileName: file.name, project, trackId: defaultTrack.id, maximumSyllables: 18 });
+      setImportOpen(false);
+    } catch (error) {
+      console.error(error);
+      flash(error instanceof Error ? error.message : 'SVP 工程读取失败');
+    }
+  };
+
+  const confirmSvpImport = async () => {
+    if (!svpImport) return;
+    setAnalyzing(true);
+    try {
+      const imported = await importSvpTrack(svpImport.project, svpImport.trackId, svpImport.maximumSyllables);
+      const timestamp = Date.now();
+      const nextLines: LyricLine[] = imported.map((line, index) => ({
+        ...line,
+        id: `svp-${timestamp}-${index}`,
+      }));
+      setLines(nextLines);
+      setActiveId(nextLines[0].id);
+      setProjectTitle(svpImport.fileName.replace(/\.svp$/i, '') || 'SVP 翻填工程');
+      setSelectedCell(0);
+      setSubtitleName('');
+      setLooping(false);
+      setFollowLyrics(true);
+      setSvpImport(null);
+      flash(`已从 SVP 拆出 ${nextLines.length} 句，原工程没有改动`);
+    } catch (error) {
+      console.error(error);
+      flash(error instanceof Error ? error.message : 'SVP 轨道分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio) {
@@ -511,6 +580,7 @@ export default function Home() {
 
   return (
     <main className="app-shell">
+      <input ref={svpRef} type="file" accept=".svp,application/json" onChange={handleSvp} hidden />
       <header className="topbar">
         <div className="brand" aria-label="词格 Lyric Grid">
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
@@ -524,6 +594,7 @@ export default function Home() {
         </label>
         <div className="top-actions">
           <button className="help-button" onClick={openTutorial} aria-label="打开新手教程"><span>？</span><b>新手教程</b></button>
+          <button className="button button-quiet" onClick={() => svpRef.current?.click()}>导入 SVP β</button>
           <button className="button button-quiet" onClick={() => setImportOpen(true)}>导入歌词</button>
           <button className="button button-quiet export-button" onClick={exportProject}>导出</button>
           <button className="button button-primary" onClick={() => setImportOpen(true)}>＋ 新建工程</button>
@@ -606,6 +677,34 @@ export default function Home() {
               </div>
             )}
 
+            {activeLine.svp && (
+              <div className="svp-note-panel">
+                <div className="svp-note-heading">
+                  <span><b>SVP 音符</b> · {activeLine.svp.trackName}</span>
+                  <small>v{activeLine.svp.version} · {formatTime(activeLine.start ?? 0)}–{formatTime(activeLine.end ?? 0)}</small>
+                </div>
+                <div className="svp-note-scroll" aria-label="SVP 音符时间线">
+                  <div className="svp-note-flow">
+                    {activeLine.svp.notes.map((note) => {
+                      const width = Math.max(42, Math.min(112, note.durationSeconds * 92));
+                      const pitchOffset = Math.min(44, (activeSvpPitchRange.maximum - note.pitch) * 2.2);
+                      return (
+                        <div
+                          className={`svp-note ${note.role}`}
+                          key={note.id}
+                          style={{ width: `${width}px`, marginTop: `${pitchOffset}px` }}
+                          title={`${note.lyric} · MIDI ${note.pitch} · ${Math.round(note.durationSeconds * 1000)}ms`}
+                        >
+                          <b>{note.role === 'hold' ? '—' : note.lyric}</b>
+                          <small>{note.role === 'hold' ? '续音' : note.role === 'syllable' ? '拆音' : `${Math.round(note.durationSeconds * 1000)}ms`}</small>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
           </section>
 
@@ -684,7 +783,36 @@ export default function Home() {
             <p>每一行会作为一句。支持日语、英语和日英混合歌词。</p>
             <textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={'どうして どうして 私だけ\n乾燥し切った眼でlove-la-villain'} autoFocus />
             <div className="modal-help"><span>日语</span> 自动生成假名和分格罗马音 <span>英语</span> 自动生成 IPA，可按原唱修改</div>
+            <button className="svp-import-shortcut" onClick={() => svpRef.current?.click()}>已有 SynthV 工程？导入 SVP β</button>
             <div className="modal-actions"><button onClick={() => setImportOpen(false)}>取消</button><button className="analyze-button" disabled={!importText.trim() || analyzing} onClick={analyzeLyrics}>{analyzing ? '正在加载发音辞典…' : '分析歌词 →'}</button></div>
+          </section>
+        </div>
+      )}
+
+      {svpImport && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="svp-import-modal" role="dialog" aria-modal="true" aria-labelledby="svp-import-title">
+            <button className="modal-close" aria-label="取消导入 SVP" onClick={() => setSvpImport(null)}>×</button>
+            <span className="eyebrow">实验性 SVP 导入</span>
+            <h2 id="svp-import-title">选择要翻填的歌唱轨道</h2>
+            <p>{svpImport.fileName} · SVP v{svpImport.project.version} · 原文件只读</p>
+
+            <div className="svp-track-list">
+              {svpImport.project.tracks.map((track) => (
+                <button className={track.id === svpImport.trackId ? 'selected' : ''} key={track.id} onClick={() => setSvpImport((current) => current ? { ...current, trackId: track.id } : current)}>
+                  <span><b>{track.name}</b><small>{track.detectedLanguage === 'zh' ? '检测到中文' : track.detectedLanguage === 'ja' ? '检测到日语' : track.detectedLanguage === 'latin' ? '罗马音/英语' : track.language === 'japanese' ? '日语轨道' : '混合歌词'}</small></span>
+                  <span><strong>{track.notes.length}</strong><small>音符 · {formatTime(track.durationSeconds)}</small></span>
+                </button>
+              ))}
+            </div>
+
+            <div className="svp-phrase-setting">
+              <span><b>自动分句长度</b><small>句子太碎或太长时，可以换一档</small></span>
+              <div>{[12, 18, 24].map((value) => <button className={svpImport.maximumSyllables === value ? 'selected' : ''} key={value} onClick={() => setSvpImport((current) => current ? { ...current, maximumSyllables: value } : current)}>{value === 12 ? '短句' : value === 18 ? '常规' : '长句'}</button>)}</div>
+            </div>
+
+            <div className="svp-import-note">会读取歌词、音高、时值、休止与音符组；歌曲音频仍需单独上传。</div>
+            <div className="modal-actions"><button onClick={() => setSvpImport(null)}>取消</button><button className="analyze-button" disabled={analyzing} onClick={confirmSvpImport}>{analyzing ? '正在拆分音符…' : '导入所选轨道 →'}</button></div>
           </section>
         </div>
       )}
@@ -703,7 +831,7 @@ export default function Home() {
             </div>
 
             <ol className="tutorial-steps">
-              <li><span>1</span><p><strong>粘贴原歌词</strong><small>点“新建工程”，一句放一行，罗马音会自动出来。</small></p></li>
+              <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、SRT 或 LRC，罗马音会自动出来。</small></p></li>
               <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
               <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。格子下方会显示拼音，句尾会告诉你是什么韵。</small></p></li>
               <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>

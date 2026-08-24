@@ -112,6 +112,18 @@ button { color: inherit; }
 .analysis-note { margin-top: 10px; padding: 11px 13px; border-radius: 10px; background: #111719; color: #84908a; font-size: 10px; line-height: 1.65; }
 .analysis-note code { color: #d3dbd6; font-family: ui-monospace, monospace; }
 .analysis-spark { color: var(--lime); margin-right: 7px; }
+.svp-note-panel { margin-top: 10px; padding: 10px; border: 1px solid #30403b; border-radius: 12px; background: #111719; }
+.svp-note-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: #798680; font-size: 9px; }
+.svp-note-heading b { color: #c7d2cc; }
+.svp-note-heading small { color: #61706a; font: 8px ui-monospace, monospace; }
+.svp-note-scroll { margin-top: 8px; overflow-x: auto; padding: 3px 1px 8px; scrollbar-color: #36413d transparent; }
+.svp-note-flow { min-width: max-content; height: 92px; display: flex; align-items: flex-start; gap: 3px; }
+.svp-note { flex: 0 0 auto; height: 43px; border: 1px solid #49603c; border-radius: 8px; background: linear-gradient(180deg, #2b3927, #222d22); display: grid; place-items: center; align-content: center; gap: 3px; color: #e9f0e4; overflow: hidden; }
+.svp-note b { max-width: calc(100% - 6px); overflow: hidden; text-overflow: ellipsis; font: 700 11px ui-monospace, "Cascadia Code", monospace; }
+.svp-note small { color: #81907c; font-size: 7px; }
+.svp-note.hold { border-style: dashed; border-color: #49554f; background: #1a2122; color: #73807a; }
+.svp-note.syllable { border-color: #39716e; background: #1d302f; color: var(--cyan); }
+.svp-note.breath { border-style: dotted; border-color: #64583e; background: #29251c; color: var(--amber); }
 
 .mini-toolbar { display: flex; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 9px; background: #111719; }
 .mini-toolbar button { background: transparent; color: #79857f; border-radius: 6px; padding: 6px 9px; font-size: 9px; }
@@ -193,6 +205,26 @@ button { color: inherit; }
 .modal-actions button { height: 38px; border: 1px solid var(--line); border-radius: 9px; background: #1b2325; color: #909b95; padding: 0 15px; font-size: 11px; cursor: pointer; }
 .modal-actions .analyze-button { min-width: 145px; border: 0; background: var(--lime); color: #11170f; font-weight: 800; }
 .modal-actions .analyze-button:disabled { opacity: .45; cursor: wait; }
+.svp-import-shortcut { width: 100%; margin-top: 12px; height: 35px; border: 1px dashed #405044; border-radius: 9px; background: #18201d; color: #a7bd91; font-size: 10px; cursor: pointer; }
+.svp-import-modal { position: relative; width: min(660px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; border: 1px solid #394542; border-radius: 20px; background: #151b1d; padding: 28px; box-shadow: 0 35px 120px rgba(0, 0, 0, .55); }
+.svp-import-modal h2 { margin: 8px 0 4px; font-size: 23px; }
+.svp-import-modal > p { margin: 0 0 16px; color: #79857f; font-size: 10px; }
+.svp-track-list { display: grid; gap: 6px; max-height: 290px; overflow-y: auto; }
+.svp-track-list > button { min-height: 58px; border: 1px solid #2d3837; border-radius: 11px; background: #111719; padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; text-align: left; cursor: pointer; }
+.svp-track-list > button.selected { border-color: #5c733e; background: linear-gradient(135deg, rgba(200, 243, 107, .12), rgba(200, 243, 107, .025)); }
+.svp-track-list span { display: grid; gap: 3px; }
+.svp-track-list span:last-child { text-align: right; }
+.svp-track-list b { color: #dce4df; font-size: 11px; }
+.svp-track-list strong { color: var(--lime); font-size: 14px; }
+.svp-track-list small { color: #69756f; font-size: 8px; }
+.svp-phrase-setting { margin-top: 12px; padding: 11px 12px; border: 1px solid #2d3837; border-radius: 11px; background: #111719; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.svp-phrase-setting > span { display: grid; gap: 3px; }
+.svp-phrase-setting b { color: #cbd4ce; font-size: 10px; }
+.svp-phrase-setting small { color: #68746e; font-size: 8px; }
+.svp-phrase-setting > div { display: flex; gap: 4px; }
+.svp-phrase-setting button { height: 28px; border: 1px solid #303b39; border-radius: 7px; background: #1b2324; color: #7e8a84; padding: 0 9px; font-size: 8px; cursor: pointer; }
+.svp-phrase-setting button.selected { border-color: #5a713d; background: #27331f; color: var(--lime); }
+.svp-import-note { margin-top: 10px; color: #69756f; font-size: 8px; line-height: 1.6; }
 .tutorial-backdrop { z-index: 50; }
 .tutorial-modal { width: min(650px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; border: 1px solid #46543e; border-radius: 22px; background: radial-gradient(circle at 90% 0, rgba(200, 243, 107, .1), transparent 32%), #151b1d; padding: 28px; box-shadow: 0 35px 120px rgba(0, 0, 0, .58); }
 .tutorial-kicker { color: var(--lime); font-size: 9px; font-weight: 850; letter-spacing: .12em; }
