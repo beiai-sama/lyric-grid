@@ -5,6 +5,7 @@ import {
   ParsedLyricLine,
   PronunciationToken,
   baseCount,
+  linkPronunciationTokens,
   manualPronunciationToTokens,
   parseLyricLine,
 } from '../lib/phonetics';
@@ -49,6 +50,7 @@ const seedLines: LyricLine[] = [
 
 const languageLabel = { ja: '日语', en: '英语', mixed: '日英混合' } as const;
 const storageKey = 'lyric-grid-project-v1';
+const phoneticVersion = 2;
 
 function formatTime(value: number): string {
   if (!Number.isFinite(value)) return '00:00.00';
@@ -98,13 +100,47 @@ export default function Home() {
   const delta = currentCount - suggestedCount;
 
   useEffect(() => {
-    queueMicrotask(() => {
+    let cancelled = false;
+    queueMicrotask(() => void (async () => {
       const saved = window.localStorage.getItem(storageKey);
       if (saved) {
         try {
-          const parsed = JSON.parse(saved) as { title?: string; lines?: LyricLine[]; activeId?: string };
+          const parsed = JSON.parse(saved) as { title?: string; lines?: LyricLine[]; activeId?: string; phoneticVersion?: number };
           if (parsed.lines?.length) {
-            setLines(parsed.lines);
+            const restoredLines = parsed.phoneticVersion === phoneticVersion
+              ? parsed.lines
+              : await Promise.all(parsed.lines.map(async (line, index) => {
+                let tokens = linkPronunciationTokens(line.tokens);
+                let kana = line.kana;
+                let language = line.language;
+                let uncertain = line.uncertain;
+
+                if (!line.tokens.some((item) => item.source === 'manual')) {
+                  try {
+                    const reparsed = await parseLyricLine(line.source, index);
+                    tokens = reparsed.tokens;
+                    kana = reparsed.kana;
+                    language = reparsed.language;
+                    uncertain = reparsed.uncertain;
+                  } catch {
+                    // Keep the existing analysis if the local pronunciation dictionary is unavailable.
+                  }
+                }
+
+                const hasChineseDraft = line.target.some((cell) => cell.trim());
+                return {
+                  ...line,
+                  kana,
+                  language,
+                  uncertain,
+                  tokens,
+                  target: hasChineseDraft
+                    ? line.target
+                    : Array.from({ length: Math.max(1, baseCount(tokens)) }, () => ''),
+                };
+              }));
+            if (cancelled) return;
+            setLines(restoredLines);
             setActiveId(parsed.activeId ?? parsed.lines[0].id);
             setProjectTitle(parsed.title ?? '未命名翻填工程');
           }
@@ -112,13 +148,14 @@ export default function Home() {
           window.localStorage.removeItem(storageKey);
         }
       }
-      setHydrated(true);
-    });
+      if (!cancelled) setHydrated(true);
+    })());
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
     if (!hydrated) return;
-    window.localStorage.setItem(storageKey, JSON.stringify({ title: projectTitle, lines, activeId }));
+    window.localStorage.setItem(storageKey, JSON.stringify({ phoneticVersion, title: projectTitle, lines, activeId }));
   }, [activeId, hydrated, lines, projectTitle]);
 
   useEffect(() => () => {
@@ -148,12 +185,36 @@ export default function Home() {
   };
 
   const toggleToken = (id: string) => {
-    updateActiveLine((line) => ({
-      ...line,
-      tokens: line.tokens.map((item) => item.id === id
-        ? { ...item, counted: !item.counted, kind: item.counted ? 'absorbed' : 'normal' }
-        : item),
-    }));
+    updateActiveLine((line) => {
+      const index = line.tokens.findIndex((item) => item.id === id);
+      const item = line.tokens[index];
+      if (!item) return line;
+
+      if (item.linkCandidate && index > 0) {
+        const previous = line.tokens[index - 1];
+        const currentPart = { ...item };
+        delete currentPart.linkCandidate;
+        const linked: PronunciationToken = {
+          id: `${previous.id}-linked-${item.id}`,
+          label: `${previous.label}+${item.label}`,
+          kana: `${previous.kana ?? ''}${item.kana ?? ''}` || undefined,
+          kind: 'linked',
+          counted: true,
+          source: 'ja',
+          components: [previous, currentPart],
+        };
+        return { ...line, tokens: [...line.tokens.slice(0, index - 1), linked, ...line.tokens.slice(index + 1)] };
+      }
+
+      return {
+        ...line,
+        tokens: line.tokens.flatMap((tokenItem) => {
+          if (tokenItem.id !== id) return [tokenItem];
+          if (tokenItem.kind === 'linked' && tokenItem.components?.length) return tokenItem.components;
+          return [{ ...tokenItem, counted: !tokenItem.counted, kind: tokenItem.counted ? 'absorbed' : 'normal' }];
+        }),
+      };
+    });
   };
 
   const updateCell = (index: number, value: string) => {
@@ -350,7 +411,7 @@ export default function Home() {
 
           <section className="editor-section pronunciation-section">
             <div className="section-title-row">
-              <div><span className="step-number">01</span><h2>实际唱法</h2><p>点击任意发音格，可切换是否需要新中文字</p></div>
+              <div><span className="step-number">01</span><h2>实际唱法</h2><p>连读自动合格；“可连”位置可点一下确认</p></div>
               <div className="section-actions">
                 {activeLine.kana && <button className="text-button" onClick={() => setShowKana((value) => !value)}>{showKana ? '收起假名' : '显示假名'}</button>}
                 <button className="text-button" onClick={startPronunciationEdit}>编辑唱法</button>
@@ -367,17 +428,19 @@ export default function Home() {
             ) : (
               <div className="token-track" aria-label="分格罗马音">
                 {activeLine.tokens.map((item) => (
-                  <button className={`phoneme-token ${item.kind} ${!item.counted ? 'not-counted' : ''}`} key={item.id} onClick={() => toggleToken(item.id)} title={item.counted ? '计入基础字数；点击改为可吸收' : '不计入基础字数；点击改为普通发音'}>
+                  <button className={`phoneme-token ${item.kind} ${item.linkCandidate ? 'link-candidate' : ''} ${!item.counted ? 'not-counted' : ''}`} key={item.id} onClick={() => toggleToken(item.id)} title={item.kind === 'linked' ? '两个音连读为一个中文格；点击拆回两格' : item.linkCandidate ? '这里可能发生元音连读；点击与前一音合成一格' : item.counted ? '计入基础字数；点击改为可吸收' : '不计入基础字数；点击改为普通发音'}>
                     <span>{item.label}</span>
                     {!item.counted && <small>吸收</small>}
                     {item.kind === 'long' && item.counted && <small>长音</small>}
+                    {item.kind === 'linked' && <small>连读</small>}
+                    {item.linkCandidate && <small>可连</small>}
                     {item.kind === 'uncertain' && <small>待确认</small>}
                   </button>
                 ))}
               </div>
             )}
 
-            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；灰色格默认由相邻中文字吸收。`}</div>
+            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
           </section>
 
           <section className="editor-section target-section">
@@ -432,7 +495,7 @@ export default function Home() {
             <div className="marker-actions"><button onClick={() => setMarker('start')}>设为句首</button><button onClick={() => setMarker('end')}>设为句尾</button></div>
             <div className="marker-time"><span>A {formatTime(activeLine.start ?? 0)}</span><span>B {activeLine.end != null ? formatTime(activeLine.end) : '未设置'}</span></div>
           </div>
-          <div className="legend-card"><h3>格子说明</h3><p><span className="legend-dot normal" />普通发音 <small>建议填一字</small></p><p><span className="legend-dot long" />长音 <small>默认一字，可拆</small></p><p><span className="legend-dot absorbed" />可吸收 <small>默认不添字</small></p></div>
+          <div className="legend-card"><h3>格子说明</h3><p><span className="legend-dot normal" />普通发音 <small>建议填一字</small></p><p><span className="legend-dot candidate" />连读候选 <small>点一下与前音合并</small></p><p><span className="legend-dot linked" />连读 <small>两个音合占一字，可拆</small></p><p><span className="legend-dot long" />长音 <small>默认一字，可拆</small></p><p><span className="legend-dot absorbed" />可吸收 <small>默认不添字</small></p></div>
           <div className="tip-card"><span>提示</span><p>基础建议不是硬性答案。只要唱起来顺，你可以把延音移动到任何位置。</p></div>
         </aside>
       </div>

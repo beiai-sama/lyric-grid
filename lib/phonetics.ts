@@ -1,4 +1,4 @@
-export type TokenKind = 'normal' | 'long' | 'absorbed' | 'uncertain';
+export type TokenKind = 'normal' | 'long' | 'absorbed' | 'linked' | 'uncertain';
 
 export type PronunciationToken = {
   id: string;
@@ -8,6 +8,8 @@ export type PronunciationToken = {
   kind: TokenKind;
   counted: boolean;
   source: 'ja' | 'en' | 'manual';
+  components?: PronunciationToken[];
+  linkCandidate?: boolean;
 };
 
 export type ParsedLyricLine = {
@@ -95,6 +97,7 @@ const kanaMap: Record<string, string> = {
 };
 
 const smallKana = new Set(['ゃ', 'ゅ', 'ょ', 'ぁ', 'ぃ', 'ぅ', 'ぇ', 'ぉ', 'ゎ']);
+const linkableVowelPairs = new Set(['ai', 'ei', 'ao', 'ou', 'ia', 'ie', 'iu', 'ua', 'uo', 'ui', 'ue']);
 
 export function toHiragana(value: string): string {
   return Array.from(value).map((character) => {
@@ -149,6 +152,69 @@ export function kanaToTokens(value: string, prefix = 'ja'): PronunciationToken[]
       counted: true,
       source: 'ja',
     };
+  });
+}
+
+function finalVowel(value: string): string | undefined {
+  const normalized = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return normalized.match(/[aeiou](?!.*[aeiou])/)?.[0];
+}
+
+/**
+ * Merge high-confidence Japanese vowel continuations into one Chinese lyric slot.
+ * For example, na + i becomes na+i and no + u becomes no+u. The original
+ * tokens are retained so the UI can split the linked unit back apart.
+ */
+export function linkPronunciationTokens(tokens: PronunciationToken[]): PronunciationToken[] {
+  const result: PronunciationToken[] = [];
+
+  tokens.forEach((current) => {
+    const previous = result[result.length - 1];
+    const nextVowel = current.label.toLowerCase();
+    const previousVowel = previous ? finalVowel(previous.label) : undefined;
+    const canLink = Boolean(
+      previous
+      && previous.source === 'ja'
+      && current.source === 'ja'
+      && previous.kind === 'normal'
+      && current.kind === 'normal'
+      && previous.counted
+      && current.counted
+      && /^[aeiou]$/.test(nextVowel)
+      && previousVowel
+      && linkableVowelPairs.has(`${previousVowel}${nextVowel}`),
+    );
+
+    if (!canLink || !previous) {
+      result.push(current);
+      return;
+    }
+
+    result[result.length - 1] = {
+      id: `${previous.id}-linked-${current.id}`,
+      label: `${previous.label}+${current.label}`,
+      kana: `${previous.kana ?? ''}${current.kana ?? ''}` || undefined,
+      kind: 'linked',
+      counted: true,
+      source: 'ja',
+      components: [previous, current],
+    };
+  });
+
+  return result.map((current, index) => {
+    const previous = result[index - 1];
+    const isCandidate = Boolean(
+      previous
+      && previous.source === 'ja'
+      && current.source === 'ja'
+      && previous.kind === 'normal'
+      && current.kind === 'normal'
+      && previous.counted
+      && current.counted
+      && /^[aeiou]$/i.test(current.label)
+      && finalVowel(previous.label),
+    );
+    return isCandidate ? { ...current, linkCandidate: true } : current;
   });
 }
 
@@ -246,7 +312,8 @@ export async function parseLyricLine(source: string, lineIndex = 0): Promise<Par
     hasJapanese = true;
     const rows = await analyzer.parse(segment);
     rows.forEach((row, rowIndex) => {
-      const pronunciation = row.pronunciation ?? row.reading;
+      const kanaSurface = /^[\u3040-\u30ffー]+$/.test(row.surface_form) ? row.surface_form : undefined;
+      const pronunciation = row.pronunciation ?? row.reading ?? kanaSurface;
       if (!pronunciation) return;
       kanaParts.push(toHiragana(row.reading ?? pronunciation));
       tokens.push(...kanaToTokens(pronunciation, `ja-${lineIndex}-${segmentIndex}-${rowIndex}`));
@@ -256,7 +323,7 @@ export async function parseLyricLine(source: string, lineIndex = 0): Promise<Par
   return {
     source,
     kana: kanaParts.join(' '),
-    tokens,
+    tokens: linkPronunciationTokens(tokens),
     language: hasJapanese && hasEnglish ? 'mixed' : hasEnglish ? 'en' : 'ja',
     uncertain: uncertain || hasEnglish,
   };
@@ -264,6 +331,24 @@ export async function parseLyricLine(source: string, lineIndex = 0): Promise<Par
 
 export function manualPronunciationToTokens(value: string): PronunciationToken[] {
   return value.trim().split(/\s+/).filter(Boolean).map((label, index) => {
+    const linkedParts = label.split('+').filter(Boolean);
+    if (linkedParts.length > 1) {
+      const components = linkedParts.map((part, partIndex): PronunciationToken => ({
+        id: makeId(`manual-${index}`, partIndex),
+        label: part,
+        kind: 'normal',
+        counted: true,
+        source: 'manual',
+      }));
+      return {
+        id: makeId('manual-linked', index),
+        label: linkedParts.join('+'),
+        kind: 'linked',
+        counted: true,
+        source: 'manual',
+        components,
+      };
+    }
     const normalized = label.toLowerCase();
     const absorbed = normalized === 'n' || normalized === 'q' || normalized === 'cl' || normalized === 'っ';
     const long = /[āīūēōː:]$/.test(normalized);
