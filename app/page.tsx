@@ -59,6 +59,7 @@ type ThemeConfig = {
 };
 
 type AiTask = 'translate' | 'rhyme' | 'imagery' | 'music';
+type AiGatePhase = 'locked' | 'unlocking';
 
 type AiConfig = {
   endpoint: string;
@@ -126,6 +127,8 @@ const storageKey = 'lyric-grid-project-v1';
 const tutorialStorageKey = 'lyric-grid-tutorial-dismissed-v1';
 const themeStorageKey = 'lyric-grid-theme-v1';
 const aiStorageKey = 'lyric-grid-ai-config-v1';
+const aiOathStorageKey = 'lyric-grid-ai-oath-v1';
+const aiOathText = '我不会使用AI生成歌词';
 const phoneticVersion = 2;
 
 function formatTime(value: number): string {
@@ -200,6 +203,11 @@ export default function Home() {
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeConfig>(defaultTheme);
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiGateOpen, setAiGateOpen] = useState(false);
+  const [aiGatePhase, setAiGatePhase] = useState<AiGatePhase>('locked');
+  const [aiOathAccepted, setAiOathAccepted] = useState(false);
+  const [aiOathInput, setAiOathInput] = useState('');
+  const [aiOathHint, setAiOathHint] = useState('请亲手输入，复制粘贴无效');
   const [aiConfig, setAiConfig] = useState<AiConfig>(defaultAiConfig);
   const [aiKey, setAiKey] = useState('');
   const [aiTask, setAiTask] = useState<AiTask>('translate');
@@ -250,6 +258,9 @@ export default function Home() {
     const commonRhymes = [...rhymeCounts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 4);
     return { completed, commonRhymes };
   }, [lineRhymes, lines]);
+  const aiOathMatched = aiOathInput.trim() === aiOathText;
+  const aiOathProgress = Array.from(aiOathText).findIndex((character, index) => aiOathInput[index] !== character);
+  const aiOathMatchedLength = aiOathProgress === -1 ? Math.min(aiOathInput.length, aiOathText.length) : aiOathProgress;
   const themeStyle = useMemo(() => ({
     '--lime': theme.accent,
     '--background': theme.background,
@@ -344,6 +355,7 @@ export default function Home() {
           window.localStorage.removeItem(aiStorageKey);
         }
       }
+      setAiOathAccepted(window.localStorage.getItem(aiOathStorageKey) === '1');
       if (!cancelled) {
         const tutorialDismissed = window.localStorage.getItem(tutorialStorageKey) === '1';
         setHideTutorialNextTime(tutorialDismissed);
@@ -815,6 +827,29 @@ export default function Home() {
     setTheme((current) => ({ ...current, accent, background, panel }));
   };
 
+  const openAiAssistant = () => {
+    if (aiOathAccepted) {
+      setAiOpen(true);
+      return;
+    }
+    setAiOathInput('');
+    setAiOathHint('请亲手输入，复制粘贴无效');
+    setAiGatePhase('locked');
+    setAiGateOpen(true);
+  };
+
+  const unlockAiAssistant = () => {
+    if (!aiOathMatched || aiGatePhase === 'unlocking') return;
+    setAiGatePhase('unlocking');
+    window.localStorage.setItem(aiOathStorageKey, '1');
+    window.setTimeout(() => {
+      setAiOathAccepted(true);
+      setAiGateOpen(false);
+      setAiOpen(true);
+      setAiGatePhase('locked');
+    }, 1250);
+  };
+
   const runAiAssistant = async () => {
     if (!aiKey.trim()) {
       flash('先填入自己的智谱 API Key');
@@ -888,7 +923,7 @@ export default function Home() {
         <div className="top-actions">
           <button className="help-button" onClick={openTutorial} aria-label="打开新手教程"><span>？</span><b>新手教程</b></button>
           <button className="button button-quiet" onClick={() => setPreviewOpen(true)}>全局预览</button>
-          <button className="button button-ai" onClick={() => setAiOpen(true)}>✦ AI 参谋</button>
+          <button className="button button-ai" onClick={openAiAssistant}>✦ AI 参谋</button>
           <button className="button button-quiet" onClick={() => setAppearanceOpen(true)}>外观</button>
           <button className="button button-quiet" onClick={() => svpRef.current?.click()}>导入 SVP β</button>
           <button className="button button-quiet" onClick={() => setImportOpen(true)}>导入歌词</button>
@@ -1181,6 +1216,75 @@ export default function Home() {
               </div>
             )}
             <div className="modal-actions"><button onClick={() => setTheme(defaultTheme)}>恢复默认</button><button className="analyze-button" onClick={() => setAppearanceOpen(false)}>应用外观</button></div>
+          </section>
+        </div>
+      )}
+
+      {aiGateOpen && (
+        <div className="modal-backdrop ai-gate-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && aiGatePhase === 'locked') setAiGateOpen(false); }}>
+          <section className={`ai-oath-modal ${aiGatePhase}`} role="dialog" aria-modal="true" aria-labelledby="ai-oath-title" aria-describedby="ai-oath-description">
+            {aiGatePhase === 'locked' && <button className="ai-gate-close" aria-label="关闭 AI 使用警告" onClick={() => setAiGateOpen(false)}>×</button>}
+
+            <div className="hazard-marquee" aria-hidden="true">
+              <div><span>WARNING · AI IS A TOOL · NO GHOSTWRITING · 禁止 AI 代写歌词 ·</span><span>WARNING · AI IS A TOOL · NO GHOSTWRITING · 禁止 AI 代写歌词 ·</span></div>
+            </div>
+
+            <div className="ai-gate-scan" aria-hidden="true" />
+            <div className="ai-gate-corners" aria-hidden="true"><i /><i /><i /><i /></div>
+
+            <div className="ai-gate-content">
+              <div className="ai-warning-mark" aria-hidden="true"><i>!</i><span /></div>
+              <p className="ai-security-code"><span /> LYRIC GRID / AI SAFETY PROTOCOL 01</p>
+              <h2 id="ai-oath-title">禁止直接使用 AI 生成歌词</h2>
+              <p id="ai-oath-description" className="ai-oath-lead">AI 只是帮助你查资料、找方向、拆解意象的工具。<strong>它不是偷懒的捷径，更不能替你完成创作。</strong></p>
+
+              <div className="ai-oath-rules">
+                <p><b>01</b><span><strong>创作必须由你完成</strong><small>最终的中文歌词、表达与选择，都应该来自创作者本人。</small></span></p>
+                <p><b>02</b><span><strong>参谋只提供线索</strong><small>可以直译、查韵脚、聊隐喻和音乐背景，但不会交付成品歌词。</small></span></p>
+                <p><b>03</b><span><strong>你要对作品负责</strong><small>AI 输出可能错误，也可能伤害作品独特性，请自行判断和核对。</small></span></p>
+              </div>
+
+              <div className="ai-oath-terminal">
+                <div className="ai-oath-terminal-head"><span>IDENTITY CHECK</span><b>{aiOathMatched ? 'PHRASE VERIFIED' : 'ACCESS LOCKED'}</b></div>
+                <label htmlFor="ai-oath-input">请完整输入 <code>{aiOathText}</code></label>
+                <div className={`ai-oath-input-shell ${aiOathMatched ? 'verified' : ''}`}>
+                  <span aria-hidden="true">›</span>
+                  <input
+                    id="ai-oath-input"
+                    autoFocus
+                    autoComplete="off"
+                    spellCheck={false}
+                    maxLength={aiOathText.length}
+                    value={aiOathInput}
+                    onChange={(event) => { setAiOathInput(event.target.value); setAiOathHint('请亲手输入，复制粘贴无效'); }}
+                    onPaste={(event) => { event.preventDefault(); setAiOathHint('检测到粘贴：请亲手输入这句承诺'); }}
+                    onDrop={(event) => { event.preventDefault(); setAiOathHint('拖入文字也不算，请亲手输入'); }}
+                    onKeyDown={(event) => { if (event.key === 'Enter') unlockAiAssistant(); }}
+                    placeholder="在这里输入使用承诺"
+                  />
+                  <b>{String(aiOathMatchedLength).padStart(2, '0')} / {aiOathText.length}</b>
+                </div>
+                <div className="ai-oath-progress" aria-hidden="true"><i style={{ width: `${(aiOathMatchedLength / aiOathText.length) * 100}%` }} /></div>
+                <p className="ai-oath-hint" aria-live="polite">{aiOathMatched ? '身份誓约匹配。可以解除限制。' : aiOathHint}</p>
+              </div>
+
+              <button className="ai-unlock-button" disabled={!aiOathMatched || aiGatePhase === 'unlocking'} onClick={unlockAiAssistant}>
+                <span className="ai-unlock-icon" aria-hidden="true"><i /></span>
+                <span><strong>解除 AI 参谋限制</strong><small>{aiOathMatched ? '确认承诺并进入' : '完成输入后解锁'}</small></span>
+                <b aria-hidden="true">HOLD TO CREATE →</b>
+              </button>
+            </div>
+
+            <div className="ai-unlock-sequence" aria-live="assertive" aria-hidden={aiGatePhase !== 'unlocking'}>
+              <span className="unlock-reticle"><i /><i /></span>
+              <p>OATH ACCEPTED</p>
+              <strong>创作权限由你掌握</strong>
+              <small>AI 参谋接入中</small>
+            </div>
+
+            <div className="hazard-marquee bottom" aria-hidden="true">
+              <div><span>CREATE WITH YOUR OWN VOICE · KEEP HUMAN INTENT IN CONTROL ·</span><span>CREATE WITH YOUR OWN VOICE · KEEP HUMAN INTENT IN CONTROL ·</span></div>
+            </div>
           </section>
         </div>
       )}
