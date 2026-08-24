@@ -144,6 +144,11 @@ button { color: inherit; }
 .play-button { width: 42px; height: 42px; border-radius: 50%; background: var(--lime) !important; color: #121710 !important; padding-left: 3px; font-size: 14px !important; }
 .upload-audio { width: 100%; height: 34px; border-radius: 8px; background: #20282a; border: 1px solid #303a3b; color: #a5afaa; font-size: 10px; }
 .audio-name { margin: 0; padding: 9px 10px; border: 1px solid #303a3b; border-radius: 8px; color: #96a19b; background: #1c2426; font-size: 9px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: center; }
+.subtitle-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+.subtitle-actions button { min-width: 0; height: 31px; border: 1px solid #303a3b; border-radius: 8px; background: #1a2224; color: #87938d; font-size: 8px; cursor: pointer; }
+.subtitle-actions button.on { border-color: #49603c; background: #25321f; color: var(--lime); }
+.subtitle-actions button:disabled { opacity: .5; cursor: wait; }
+.subtitle-name { margin: 7px 0 0; color: #69756f; font-size: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: center; }
 .loop-button.on { color: var(--lime); }
 .marker-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
 .marker-actions button { height: 28px; border: 1px solid #2f3939; border-radius: 7px; background: #171f20; color: #7f8a85; font-size: 9px; cursor: pointer; }
@@ -160,6 +165,9 @@ button { color: inherit; }
 .tip-card { background: linear-gradient(145deg, rgba(200, 243, 107, .1), rgba(200, 243, 107, .02)); }
 .tip-card > span { color: var(--lime); font-size: 9px; font-weight: 800; }
 .tip-card p { color: #919c96; font-size: 10px; line-height: 1.65; margin: 7px 0 0; }
+.creator-credit { display: flex; align-items: baseline; justify-content: center; gap: 7px; padding: 8px 0 2px; color: #58645e; }
+.creator-credit span { font-size: 8px; letter-spacing: .12em; }
+.creator-credit strong { color: #8e9a94; font-size: 10px; letter-spacing: .04em; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 20px; background: rgba(5, 8, 9, .78); backdrop-filter: blur(9px); }
 .import-modal { position: relative; width: min(680px, 100%); border: 1px solid #394542; border-radius: 20px; background: #151b1d; padding: 28px; box-shadow: 0 35px 120px rgba(0, 0, 0, .55); }

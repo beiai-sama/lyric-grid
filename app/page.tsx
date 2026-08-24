@@ -9,6 +9,12 @@ import {
   manualPronunciationToTokens,
   parseLyricLine,
 } from '../lib/phonetics';
+import {
+  lyricSimilarity,
+  parseSrt,
+  recognizeSubtitleText,
+  targetTextToCells,
+} from '../lib/subtitles';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -88,8 +94,13 @@ export default function Home() {
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(0.75);
   const [looping, setLooping] = useState(true);
+  const [followLyrics, setFollowLyrics] = useState(false);
+  const [subtitleName, setSubtitleName] = useState('');
   const audioRef = useRef<HTMLAudioElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const subtitleRef = useRef<HTMLInputElement>(null);
+  const editorPanelRef = useRef<HTMLElement>(null);
+  const lineButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const activeIndex = lines.findIndex((line) => line.id === activeId);
   const activeLine = lines[activeIndex] ?? lines[0];
@@ -161,6 +172,12 @@ export default function Home() {
   useEffect(() => () => {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
   }, [audioUrl]);
+
+  useEffect(() => {
+    if (!followLyrics || !playing) return;
+    lineButtonRefs.current.get(activeId)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    editorPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [activeId, followLyrics, playing]);
 
   const updateActiveLine = (updater: (line: LyricLine) => LyricLine) => {
     setLines((current) => current.map((line) => line.id === activeId ? updater(line) : line));
@@ -303,6 +320,91 @@ export default function Home() {
     flash('音频只在本机打开');
   };
 
+  const handleSubtitle = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const cues = parseSrt(await file.text());
+    event.target.value = '';
+    if (!cues.length) {
+      flash('没有识别到有效的 SRT 时间轴');
+      return;
+    }
+
+    setAnalyzing(true);
+    try {
+      const usedCues = new Set<number>();
+      const assignments = lines.map((line) => {
+        let bestIndex = -1;
+        let bestScore = 0;
+        cues.forEach((cue, cueIndex) => {
+          if (usedCues.has(cueIndex)) return;
+          const score = Math.max(...cue.lines.map((text) => lyricSimilarity(text, line.source)));
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = cueIndex;
+          }
+        });
+        if (bestIndex >= 0 && bestScore >= 0.58) usedCues.add(bestIndex);
+        else bestIndex = -1;
+        return { cueIndex: bestIndex, score: bestScore };
+      });
+      const strongMatches = assignments.filter((assignment) => assignment.cueIndex >= 0).length;
+      const comparableCount = Math.min(cues.length, lines.length);
+      const requiredStrongMatches = comparableCount === 1 ? 1 : Math.max(2, Math.ceil(comparableCount * 0.4));
+      const sequentialMatch = strongMatches < requiredStrongMatches && cues.length === lines.length;
+
+      if (strongMatches >= requiredStrongMatches || sequentialMatch) {
+        let recognizedTargets = 0;
+        const nextLines = lines.map((line, index) => {
+          const cueIndex = sequentialMatch ? index : assignments[index].cueIndex;
+          if (cueIndex < 0) return line;
+          const cue = cues[cueIndex];
+          const recognized = recognizeSubtitleText(cue, line.source);
+          const hasDraft = line.target.some((cell) => cell.trim());
+          const recognizedTarget = !hasDraft && recognized.target ? targetTextToCells(recognized.target) : [];
+          if (recognizedTarget.length) recognizedTargets += 1;
+          return {
+            ...line,
+            start: cue.start,
+            end: cue.end,
+            target: recognizedTarget.length ? recognizedTarget : line.target,
+          };
+        });
+        setLines(nextLines);
+        const firstTimedLine = nextLines.find((line) => line.start != null);
+        if (firstTimedLine) setActiveId(firstTimedLine.id);
+        flash(`已匹配 ${sequentialMatch ? cues.length : strongMatches} 句时间轴${recognizedTargets ? `，识别 ${recognizedTargets} 句中文填词` : ''}`);
+      } else {
+        const parsed = await Promise.all(cues.map(async (cue, index) => {
+          const recognized = recognizeSubtitleText(cue);
+          const lyric = await parseLyricLine(recognized.source, index);
+          const target = recognized.target ? targetTextToCells(recognized.target) : [];
+          return {
+            ...lyric,
+            id: `srt-${Date.now()}-${index}`,
+            start: cue.start,
+            end: cue.end,
+            target: target.length ? target : Array.from({ length: Math.max(1, baseCount(lyric.tokens)) }, () => ''),
+          } satisfies LyricLine;
+        }));
+        setLines(parsed);
+        setActiveId(parsed[0].id);
+        setProjectTitle(file.name.replace(/\.(srt|str)$/i, '') || '字幕翻填工程');
+        flash(`已从字幕新建 ${parsed.length} 句歌词工程`);
+      }
+
+      setSubtitleName(file.name);
+      setSelectedCell(0);
+      setLooping(false);
+      setFollowLyrics(true);
+    } catch (error) {
+      console.error(error);
+      flash('字幕歌词分析失败，请检查文件内容');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio) {
@@ -319,6 +421,15 @@ export default function Home() {
     if (looping && activeLine?.end != null && audio.currentTime >= activeLine.end) {
       audio.currentTime = activeLine.start ?? 0;
       void audio.play();
+    }
+    if (followLyrics && !looping) {
+      const nextLine = lines.find((line) => line.start != null
+        && audio.currentTime >= line.start
+        && (line.end == null || audio.currentTime < line.end));
+      if (nextLine && nextLine.id !== activeId) {
+        setActiveId(nextLine.id);
+        setSelectedCell(0);
+      }
     }
     setCurrentTime(audio.currentTime);
   };
@@ -384,7 +495,15 @@ export default function Home() {
               const count = baseCount(line.tokens);
               const filled = line.target.some((cell) => cell && cell !== '—');
               return (
-                <button className={`line-item ${line.id === activeId ? 'active' : ''}`} key={line.id} onClick={() => { setActiveId(line.id); setSelectedCell(0); }}>
+                <button
+                  className={`line-item ${line.id === activeId ? 'active' : ''}`}
+                  key={line.id}
+                  ref={(element) => {
+                    if (element) lineButtonRefs.current.set(line.id, element);
+                    else lineButtonRefs.current.delete(line.id);
+                  }}
+                  onClick={() => { setActiveId(line.id); setSelectedCell(0); }}
+                >
                   <span className="line-index">{String(index + 1).padStart(2, '0')}</span>
                   <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}</small></span>
                   <span className="line-count">{count}<small>字</small></span>
@@ -396,7 +515,7 @@ export default function Home() {
           <div className="local-note"><span className="lock-icon">●</span><p><strong>仅保存在这台设备</strong><br />歌词和音频不会上传。</p></div>
         </aside>
 
-        <section className="editor-panel">
+        <section className="editor-panel" ref={editorPanelRef}>
           <div className="editor-heading">
             <div>
               <span className="eyebrow">第 {String(activeIndex + 1).padStart(2, '0')} 句 · {languageLabel[activeLine.language]}{activeLine.uncertain ? ' · 需试听' : ''}</span>
@@ -486,17 +605,24 @@ export default function Home() {
           <div className="listen-heading"><span className="eyebrow">听感校对</span><h2>这一句怎么唱</h2></div>
           <div className="audio-card">
             <input ref={fileRef} type="file" accept="audio/*" onChange={handleAudio} hidden />
+            <input ref={subtitleRef} type="file" accept=".srt,.str,application/x-subrip,text/plain" onChange={handleSubtitle} hidden />
             <audio ref={audioRef} src={audioUrl || undefined} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration); event.currentTarget.playbackRate = rate; }} onTimeUpdate={handleTimeUpdate} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
             <div className="waveform" aria-hidden="true">{Array.from({ length: 38 }, (_, index) => <i key={index} style={{ height: `${18 + ((index * 17) % 54)}%` }} />)}</div>
             <input className="audio-slider" type="range" min="0" max={duration || 1} step="0.01" value={Math.min(currentTime, duration || 1)} onChange={(event) => { const value = Number(event.target.value); setCurrentTime(value); if (audioRef.current) audioRef.current.currentTime = value; }} aria-label="音频进度" />
             <div className="audio-time"><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
-            <div className="transport"><button className="speed-button" onClick={cycleRate}>{rate}×</button><button className="play-button" aria-label={playing ? '暂停' : '播放'} onClick={togglePlay}>{playing ? 'Ⅱ' : '▶'}</button><button className={`loop-button ${looping ? 'on' : ''}`} onClick={() => setLooping((value) => !value)}>↻ 循环</button></div>
+            <div className="transport"><button className="speed-button" onClick={cycleRate}>{rate}×</button><button className="play-button" aria-label={playing ? '暂停' : '播放'} onClick={togglePlay}>{playing ? 'Ⅱ' : '▶'}</button><button className={`loop-button ${looping ? 'on' : ''}`} onClick={() => { setLooping((value) => !value); setFollowLyrics(false); }}>↻ 循环</button></div>
             {audioName ? <p className="audio-name" title={audioName}>{audioName}</p> : <button className="upload-audio" onClick={() => fileRef.current?.click()}>上传歌曲音频</button>}
+            <div className="subtitle-actions">
+              <button disabled={analyzing} onClick={() => subtitleRef.current?.click()}>{analyzing ? '识别中…' : '导入 SRT / STR'}</button>
+              <button className={followLyrics ? 'on' : ''} onClick={() => { setFollowLyrics((value) => !value); setLooping(false); }}>↕ {followLyrics ? '正在跟随' : '跟随歌词'}</button>
+            </div>
+            {subtitleName && <p className="subtitle-name" title={subtitleName}>时间轴 · {subtitleName}</p>}
             <div className="marker-actions"><button onClick={() => setMarker('start')}>设为句首</button><button onClick={() => setMarker('end')}>设为句尾</button></div>
             <div className="marker-time"><span>A {formatTime(activeLine.start ?? 0)}</span><span>B {activeLine.end != null ? formatTime(activeLine.end) : '未设置'}</span></div>
           </div>
           <div className="legend-card"><h3>格子说明</h3><p><span className="legend-dot normal" />普通发音 <small>建议填一字</small></p><p><span className="legend-dot candidate" />连读候选 <small>点一下与前音合并</small></p><p><span className="legend-dot linked" />连读 <small>两个音合占一字，可拆</small></p><p><span className="legend-dot long" />长音 <small>默认一字，可拆</small></p><p><span className="legend-dot absorbed" />可吸收 <small>默认不添字</small></p></div>
           <div className="tip-card"><span>提示</span><p>基础建议不是硬性答案。只要唱起来顺，你可以把延音移动到任何位置。</p></div>
+          <div className="creator-credit"><span>策划与制作</span><strong>北艾sama</strong></div>
         </aside>
       </div>
 
