@@ -43,6 +43,8 @@ type PendingSvpImport = {
   segmentation: SvpSegmentation;
 };
 
+type SurfaceStyle = 'solid' | 'frosted' | 'liquid';
+
 type ThemeConfig = {
   accent: string;
   background: string;
@@ -50,6 +52,10 @@ type ThemeConfig = {
   backgroundImage: string;
   backgroundName: string;
   backgroundOpacity: number;
+  backgroundDim: number;
+  surfaceStyle: SurfaceStyle;
+  glassOpacity: number;
+  glassBlur: number;
 };
 
 type AiTask = 'translate' | 'rhyme' | 'imagery' | 'music';
@@ -65,7 +71,11 @@ const defaultTheme: ThemeConfig = {
   panel: '#151b1d',
   backgroundImage: '',
   backgroundName: '',
-  backgroundOpacity: 0.2,
+  backgroundOpacity: 0.72,
+  backgroundDim: 0.28,
+  surfaceStyle: 'solid',
+  glassOpacity: 0.58,
+  glassBlur: 22,
 };
 
 const defaultAiConfig: AiConfig = {
@@ -246,6 +256,9 @@ export default function Home() {
     '--panel': theme.panel,
     '--custom-bg-image': theme.backgroundImage ? `url(${JSON.stringify(theme.backgroundImage)})` : 'none',
     '--custom-bg-opacity': String(theme.backgroundOpacity),
+    '--background-dim': String(theme.backgroundDim),
+    '--glass-opacity': `${Math.round(theme.glassOpacity * 100)}%`,
+    '--glass-blur': `${theme.glassBlur}px`,
   }) as CSSProperties, [theme]);
   const activeSvpPitchRange = useMemo(() => {
     const pitches = activeLine?.svp?.notes.map((note) => note.pitch) ?? [];
@@ -858,7 +871,7 @@ export default function Home() {
   if (!activeLine) return null;
 
   return (
-    <main className="app-shell" style={themeStyle}>
+    <main className="app-shell" data-surface={theme.surfaceStyle} style={themeStyle}>
       <input ref={svpRef} type="file" accept=".svp,application/json" onChange={handleSvp} hidden />
       <input ref={backgroundRef} type="file" accept="image/*" onChange={handleBackground} hidden />
       <header className="topbar">
@@ -1115,7 +1128,23 @@ export default function Home() {
             <button className="modal-close" aria-label="关闭外观设置" onClick={() => setAppearanceOpen(false)}>×</button>
             <span className="eyebrow">只装饰你的工作台</span>
             <h2 id="appearance-title">自定义配色与背景</h2>
-            <p>颜色和图片仅保存在这台设备，不会上传。</p>
+            <p>颜色和图片仅保存在这台设备，不会上传。玻璃模式能让背景真正透出来。</p>
+
+            <div className="appearance-group-heading">
+              <div><strong>界面材质</strong><small>只改变面板质感，不会影响词格内容</small></div>
+              <span>{theme.surfaceStyle === 'liquid' ? '液态玻璃' : theme.surfaceStyle === 'frosted' ? '柔和磨砂' : '清晰实色'}</span>
+            </div>
+            <div className="material-options" aria-label="界面材质">
+              <button className={theme.surfaceStyle === 'solid' ? 'selected' : ''} aria-pressed={theme.surfaceStyle === 'solid'} onClick={() => setTheme((current) => ({ ...current, surfaceStyle: 'solid' }))}>
+                <i className="material-swatch solid"><b /></i><span><strong>清晰实色</strong><small>文字最清楚</small></span>
+              </button>
+              <button className={theme.surfaceStyle === 'frosted' ? 'selected' : ''} aria-pressed={theme.surfaceStyle === 'frosted'} onClick={() => setTheme((current) => ({ ...current, surfaceStyle: 'frosted', glassOpacity: Math.max(current.glassOpacity, 0.68), glassBlur: Math.max(current.glassBlur, 16) }))}>
+                <i className="material-swatch frosted"><b /></i><span><strong>柔和磨砂</strong><small>背景若隐若现</small></span>
+              </button>
+              <button className={theme.surfaceStyle === 'liquid' ? 'selected' : ''} aria-pressed={theme.surfaceStyle === 'liquid'} onClick={() => setTheme((current) => ({ ...current, surfaceStyle: 'liquid', glassOpacity: Math.min(current.glassOpacity, 0.58), glassBlur: Math.max(current.glassBlur, 22), backgroundOpacity: Math.max(current.backgroundOpacity, 0.78) }))}>
+                <i className="material-swatch liquid"><b /></i><span><strong>液态玻璃</strong><small>最能看清背景</small></span>
+              </button>
+            </div>
 
             <div className="theme-presets" aria-label="主题预设">
               <button className="theme-preset lime" onClick={() => applyThemePreset('#c8f36b', '#0d1214', '#151b1d')}><i /><span>酸橙夜</span></button>
@@ -1138,7 +1167,19 @@ export default function Home() {
                 <span><button onClick={() => backgroundRef.current?.click()}>选择图片</button>{theme.backgroundImage && <button className="quiet" onClick={() => setTheme((current) => ({ ...current, backgroundImage: '', backgroundName: '' }))}>移除</button>}</span>
               </div>
             </div>
-            <label className="opacity-control"><span>背景可见度 <b>{Math.round(theme.backgroundOpacity * 100)}%</b></span><input type="range" min="0.05" max="0.65" step="0.05" value={theme.backgroundOpacity} onChange={(event) => setTheme((current) => ({ ...current, backgroundOpacity: Number(event.target.value) }))} /></label>
+            <div className="appearance-range-grid">
+              <label className="opacity-control"><span>背景清晰度 <b>{Math.round(theme.backgroundOpacity * 100)}%</b></span><input type="range" min="0.1" max="1" step="0.05" value={theme.backgroundOpacity} onChange={(event) => setTheme((current) => ({ ...current, backgroundOpacity: Number(event.target.value) }))} /><small>越高越接近原图</small></label>
+              <label className="opacity-control"><span>背景压暗 <b>{Math.round(theme.backgroundDim * 100)}%</b></span><input type="range" min="0" max="0.75" step="0.05" value={theme.backgroundDim} onChange={(event) => setTheme((current) => ({ ...current, backgroundDim: Number(event.target.value) }))} /><small>字看不清时再调高</small></label>
+            </div>
+            {theme.surfaceStyle !== 'solid' && (
+              <div className="glass-controls">
+                <div className="appearance-group-heading compact"><div><strong>玻璃调校</strong><small>可以一边拖动，一边看后面的工作台</small></div></div>
+                <div className="appearance-range-grid">
+                  <label className="opacity-control"><span>玻璃浓度 <b>{Math.round(theme.glassOpacity * 100)}%</b></span><input type="range" min="0.25" max="0.9" step="0.05" value={theme.glassOpacity} onChange={(event) => setTheme((current) => ({ ...current, glassOpacity: Number(event.target.value) }))} /><small>越低越透明</small></label>
+                  <label className="opacity-control"><span>玻璃模糊 <b>{theme.glassBlur}px</b></span><input type="range" min="6" max="36" step="2" value={theme.glassBlur} onChange={(event) => setTheme((current) => ({ ...current, glassBlur: Number(event.target.value) }))} /><small>越低越能辨认背景细节</small></label>
+                </div>
+              </div>
+            )}
             <div className="modal-actions"><button onClick={() => setTheme(defaultTheme)}>恢复默认</button><button className="analyze-button" onClick={() => setAppearanceOpen(false)}>应用外观</button></div>
           </section>
         </div>
