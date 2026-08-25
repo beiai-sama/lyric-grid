@@ -40,6 +40,16 @@ import {
   parseMidiProject,
   splitMidiTrack,
 } from '../lib/midi';
+import {
+  VocaloidLanguageMode,
+  VocaloidLineMeta,
+  VocaloidProject,
+  VocaloidSegmentation,
+  importVocaloidPhrase,
+  importVocaloidTrack,
+  parseVocaloidProject,
+  splitVocaloidTrack,
+} from '../lib/vocaloid';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -48,6 +58,7 @@ type LyricLine = ParsedLyricLine & {
   end?: number;
   svp?: SvpLineMeta;
   midi?: MidiLineMeta;
+  vocaloid?: VocaloidLineMeta;
 };
 
 type PendingSvpImport = {
@@ -68,6 +79,15 @@ type PendingMidiImport = {
   polyphonyMode: MidiPolyphonyMode;
   languageMode: MidiLanguageMode;
   encoding: MidiTextEncoding;
+};
+
+type PendingVocaloidImport = {
+  fileName: string;
+  project: VocaloidProject;
+  trackId: string;
+  maximumSyllables: number;
+  segmentation: VocaloidSegmentation;
+  languageMode: VocaloidLanguageMode;
 };
 
 type UndoSnapshot = {
@@ -237,10 +257,12 @@ export default function Home() {
   const [hideTutorialNextTime, setHideTutorialNextTime] = useState(false);
   const [svpImport, setSvpImport] = useState<PendingSvpImport | null>(null);
   const [midiImport, setMidiImport] = useState<PendingMidiImport | null>(null);
+  const [vocaloidImport, setVocaloidImport] = useState<PendingVocaloidImport | null>(null);
   const [midiPreviewPlaying, setMidiPreviewPlaying] = useState(false);
   const [midiPreviewTime, setMidiPreviewTime] = useState(0);
   const [selectedSvpNoteId, setSelectedSvpNoteId] = useState('');
   const [selectedMidiNoteId, setSelectedMidiNoteId] = useState('');
+  const [selectedVocaloidNoteId, setSelectedVocaloidNoteId] = useState('');
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewShowPronunciation, setPreviewShowPronunciation] = useState(true);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
@@ -275,6 +297,7 @@ export default function Home() {
   const subtitleRef = useRef<HTMLInputElement>(null);
   const svpRef = useRef<HTMLInputElement>(null);
   const midiRef = useRef<HTMLInputElement>(null);
+  const vocaloidRef = useRef<HTMLInputElement>(null);
   const midiAudioContextRef = useRef<AudioContext | null>(null);
   const midiPreviewFrameRef = useRef<number | null>(null);
   const midiPreviewVoicesRef = useRef(new Set<OscillatorNode>());
@@ -350,6 +373,12 @@ export default function Home() {
     const track = midiImport.project.tracks.find((candidate) => candidate.id === midiImport.trackId);
     return track ? splitMidiTrack(track, midiImport.maximumSyllables, midiImport.segmentation, midiImport.polyphonyMode).length : 0;
   }, [midiImport]);
+  const estimatedVocaloidPhrases = useMemo(() => {
+    if (!vocaloidImport) return 0;
+    const track = vocaloidImport.project.tracks.find((candidate) => candidate.id === vocaloidImport.trackId);
+    return track ? splitVocaloidTrack(track, vocaloidImport.maximumSyllables, vocaloidImport.segmentation).length : 0;
+  }, [vocaloidImport]);
+  const selectedVocaloidTrack = vocaloidImport?.project.tracks.find((track) => track.id === vocaloidImport.trackId);
   const selectedMidiTrack = midiImport?.project.tracks.find((track) => track.id === midiImport.trackId);
   const midiPreviewNotes = useMemo(
     () => selectedMidiTrack ? midiNotesForMode(selectedMidiTrack, midiImport?.polyphonyMode ?? 'all') : [],
@@ -371,8 +400,21 @@ export default function Home() {
     && lines[activeIndex + 1].midi?.trackName === activeLine.midi.trackName
     && lines[activeIndex + 1].midi?.format === activeLine.midi.format,
   );
+  const canMergeNextVocaloidLine = Boolean(
+    activeLine?.vocaloid
+    && lines[activeIndex + 1]?.vocaloid
+    && lines[activeIndex + 1].vocaloid?.trackName === activeLine.vocaloid.trackName
+    && lines[activeIndex + 1].vocaloid?.format === activeLine.vocaloid.format,
+  );
   const activeMidiPitchRange = useMemo(() => {
     const pitches = activeLine?.midi?.notes.map((note) => note.pitch) ?? [];
+    return {
+      minimum: pitches.length ? Math.min(...pitches) : 60,
+      maximum: pitches.length ? Math.max(...pitches) : 60,
+    };
+  }, [activeLine]);
+  const activeVocaloidPitchRange = useMemo(() => {
+    const pitches = activeLine?.vocaloid?.notes.map((note) => note.pitch) ?? [];
     return {
       minimum: pitches.length ? Math.min(...pitches) : 60,
       maximum: pitches.length ? Math.max(...pitches) : 60,
@@ -959,6 +1001,64 @@ export default function Home() {
     }
   };
 
+  const handleVocaloid = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = '';
+    if (file.size > 30 * 1024 * 1024) {
+      flash('这个 VOCALOID 工程太大了，请先精简到 30MB 以内');
+      return;
+    }
+    try {
+      const project = await parseVocaloidProject(file.name, await file.arrayBuffer());
+      const defaultTrack = project.tracks.reduce((best, track) => track.notes.length > best.notes.length ? track : best);
+      setVocaloidImport({
+        fileName: file.name,
+        project,
+        trackId: defaultTrack.id,
+        maximumSyllables: 18,
+        segmentation: 'balanced',
+        languageMode: defaultTrack.languageHint,
+      });
+      setImportOpen(false);
+    } catch (error) {
+      console.error(error);
+      flash(error instanceof Error ? error.message : 'VOCALOID 工程读取失败');
+    }
+  };
+
+  const confirmVocaloidImport = async () => {
+    if (!vocaloidImport) return;
+    setAnalyzing(true);
+    try {
+      const imported = await importVocaloidTrack(
+        vocaloidImport.project,
+        vocaloidImport.trackId,
+        vocaloidImport.maximumSyllables,
+        vocaloidImport.segmentation,
+        vocaloidImport.languageMode,
+      );
+      const nextLines: LyricLine[] = imported.map((line, index) => ({ ...line, id: `${nextLineId('vocaloid')}-${index}` }));
+      rememberUndo(`导入 ${vocaloidImport.project.format} 工程`);
+      setLines(nextLines);
+      setActiveId(nextLines[0].id);
+      setProjectTitle(vocaloidImport.fileName.replace(/\.(vsqx|vpr)$/i, '') || 'VOCALOID 翻填工程');
+      setSelectedCell(0);
+      setSelectedVocaloidNoteId('');
+      setSubtitleName('');
+      setLooping(false);
+      setFollowLyrics(true);
+      const format = vocaloidImport.project.format;
+      setVocaloidImport(null);
+      flash(`已从 ${format} 拆出 ${nextLines.length} 句，原工程没有改动`);
+    } catch (error) {
+      console.error(error);
+      flash(error instanceof Error ? error.message : 'VOCALOID 轨道分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const handleSvp = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1225,6 +1325,69 @@ export default function Home() {
     }
   };
 
+  const splitActiveVocaloidLine = async () => {
+    if (!activeLine.vocaloid || !selectedVocaloidNoteId) {
+      flash('先在 VOCALOID 音符条里点一下新句的第一个音符');
+      return;
+    }
+    const noteIndex = activeLine.vocaloid.notes.findIndex((note) => note.id === selectedVocaloidNoteId);
+    if (noteIndex <= 0 || noteIndex >= activeLine.vocaloid.notes.length) {
+      flash('请选择中间的实际发音作为下一句开头');
+      return;
+    }
+    if (activeLine.vocaloid.notes[noteIndex].role !== 'normal') {
+      flash('延音和换气不能作为句首，请选择后面的实际发音');
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const { notes, ...meta } = activeLine.vocaloid;
+      const [leftGenerated, rightGenerated] = await Promise.all([
+        importVocaloidPhrase(meta, notes.slice(0, noteIndex), activeIndex),
+        importVocaloidPhrase(meta, notes.slice(noteIndex), activeIndex + 1),
+      ]);
+      const targetPivot = leftGenerated.target.length;
+      const rightId = nextLineId('vocaloid-manual');
+      const left: LyricLine = { ...leftGenerated, id: activeLine.id, target: activeLine.target.slice(0, targetPivot) };
+      const rightDraft = activeLine.target.slice(targetPivot);
+      const right: LyricLine = { ...rightGenerated, id: rightId, target: rightDraft.length ? rightDraft : rightGenerated.target };
+      rememberUndo('拆分 VOCALOID 句子');
+      setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [left, right] : [line]));
+      setActiveId(rightId);
+      setSelectedCell(0);
+      setSelectedVocaloidNoteId('');
+      flash('已从选中 VOCALOID 音符切成上下两句');
+    } catch (error) {
+      console.error(error);
+      flash('这次断句没有成功，请换一个音符再试');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const mergeNextVocaloidLine = async () => {
+    const nextLine = lines[activeIndex + 1];
+    if (!activeLine.vocaloid || !nextLine?.vocaloid || !canMergeNextVocaloidLine) {
+      flash('下一句不是同一条 VOCALOID 轨道，不能直接合并');
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const { notes, ...meta } = activeLine.vocaloid;
+      const generated = await importVocaloidPhrase(meta, [...notes, ...nextLine.vocaloid.notes], activeIndex);
+      const merged: LyricLine = { ...generated, id: activeLine.id, target: [...activeLine.target, ...nextLine.target] };
+      rememberUndo('合并 VOCALOID 句子');
+      setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [merged] : line.id === nextLine.id ? [] : [line]));
+      setSelectedVocaloidNoteId('');
+      flash('已与下一句合并');
+    } catch (error) {
+      console.error(error);
+      flash('这两句暂时无法合并');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio || !audioUrl) {
@@ -1390,6 +1553,7 @@ export default function Home() {
     <main className="app-shell" data-surface={theme.surfaceStyle} style={themeStyle}>
       <input ref={svpRef} type="file" accept=".svp,application/json" onChange={handleSvp} hidden />
       <input ref={midiRef} type="file" accept=".mid,.midi,audio/midi,audio/x-midi" onChange={handleMidi} hidden />
+      <input ref={vocaloidRef} type="file" accept=".vsqx,.vpr" onChange={handleVocaloid} hidden />
       <input ref={backgroundRef} type="file" accept="image/*" onChange={handleBackground} hidden />
       <header className="topbar">
         <div className="brand" aria-label="词格 Lyric Grid">
@@ -1413,6 +1577,7 @@ export default function Home() {
             {importMenuOpen && (
               <div className="import-menu-popover" role="menu" aria-label="选择导入类型">
                 <button role="menuitem" onClick={() => { setImportMenuOpen(false); svpRef.current?.click(); }}><span className="import-kind svp">SVP</span><p><b>SVP 工程</b><small>读取歌唱轨、音符与歌词</small></p><em>测试中</em></button>
+                <button role="menuitem" onClick={() => { setImportMenuOpen(false); vocaloidRef.current?.click(); }}><span className="import-kind vocaloid">V5</span><p><b>VOCALOID 工程</b><small>导入 VSQX / VPR 歌唱工程</small></p><em>新</em></button>
                 <button role="menuitem" onClick={() => { setImportMenuOpen(false); midiRef.current?.click(); }}><span className="import-kind midi">MID</span><p><b>MIDI 旋律</b><small>选轨、试听并按音符拆句</small></p></button>
                 <button role="menuitem" onClick={() => { setImportMenuOpen(false); setImportOpen(true); }}><span className="import-kind text">TXT</span><p><b>歌词文本</b><small>粘贴日语或英语歌词</small></p></button>
               </div>
@@ -1443,7 +1608,7 @@ export default function Home() {
                     if (element) lineButtonRefs.current.set(line.id, element);
                     else lineButtonRefs.current.delete(line.id);
                   }}
-                  onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); setSelectedMidiNoteId(''); }}
+                  onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); setSelectedMidiNoteId(''); setSelectedVocaloidNoteId(''); }}
                 >
                   <span className="line-index">{String(index + 1).padStart(2, '0')}</span>
                   <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}{rhyme?.final && <em> · {rhyme.final} 韵</em>}</small></span>
@@ -1578,7 +1743,43 @@ export default function Home() {
               </div>
             )}
 
-            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
+            {activeLine.vocaloid && (
+              <div className="svp-note-panel vocaloid-note-panel">
+                <div className="svp-note-heading">
+                  <span><b>{activeLine.vocaloid.format} 音符</b> · {activeLine.vocaloid.trackName}<small>v{activeLine.vocaloid.version} · {formatTime(activeLine.start ?? 0)}–{formatTime(activeLine.end ?? 0)}</small></span>
+                  <div className="svp-note-tools">
+                    <button disabled={!selectedVocaloidNoteId || analyzing} onClick={splitActiveVocaloidLine}>从选中音符断句</button>
+                    <button disabled={!canMergeNextVocaloidLine || analyzing} onClick={mergeNextVocaloidLine}>与下一句合并</button>
+                  </div>
+                </div>
+                <p className="svp-split-help">自动断句不合适时，点“下一句的第一个实际发音”，再按“从选中音符断句”。小字会显示工程里的原始音素。</p>
+                <div className="svp-note-scroll" aria-label={`${activeLine.vocaloid.format} 音符时间线`}>
+                  <div className="svp-note-flow">
+                    {activeLine.vocaloid.notes.map((note) => {
+                      const width = Math.max(42, Math.min(112, note.durationSeconds * 92));
+                      const pitchOffset = Math.min(44, (activeVocaloidPitchRange.maximum - note.pitch) * 2.2);
+                      const selectable = note.role === 'normal';
+                      return (
+                        <button
+                          type="button"
+                          className={`svp-note vocaloid-note ${note.role} ${selectedVocaloidNoteId === note.id ? 'selected' : ''}`}
+                          key={note.id}
+                          style={{ width: `${width}px`, marginTop: `${pitchOffset}px` }}
+                          disabled={!selectable}
+                          onClick={() => setSelectedVocaloidNoteId((current) => current === note.id ? '' : note.id)}
+                          title={selectable ? `${note.lyric} · ${note.phoneme || '无单独音素'} · M${note.pitch}` : `${note.lyric} · 续音不能作为句首`}
+                        >
+                          <b>{note.role === 'hold' ? '—' : note.lyric}</b>
+                          <small>{note.role === 'hold' ? '续音' : note.phoneme || `M${note.pitch} · ${Math.round(note.durationSeconds * 1000)}ms`}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.vocaloid ? `${activeLine.vocaloid.format} 已保留原音符与歌词；读法仍以听感为准，可点“编辑唱法”修正。` : activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
           </section>
 
           <section className={`editor-section target-section ${followLyrics && playing ? 'lrc-entering lrc-entering-late' : ''}`} key={`target-${activeLine.id}`}>
@@ -1893,6 +2094,7 @@ export default function Home() {
             <div className="modal-help"><span>日语</span> 自动生成假名和分格罗马音 <span>英语</span> 自动生成 IPA，可按原唱修改</div>
             <div className="project-import-shortcuts">
               <button className="svp-import-shortcut" onClick={() => svpRef.current?.click()}>已有 SynthV 工程？导入 SVP β</button>
+              <button className="svp-import-shortcut vocaloid-import-shortcut" onClick={() => vocaloidRef.current?.click()}>有 VOCALOID 工程？导入 VSQX / VPR</button>
               <button className="svp-import-shortcut midi-import-shortcut" onClick={() => midiRef.current?.click()}>有旋律文件？导入 MIDI</button>
             </div>
             <div className="modal-actions"><button onClick={() => setImportOpen(false)}>取消</button><button className="analyze-button" disabled={!importText.trim() || analyzing} onClick={analyzeLyrics}>{analyzing ? '正在加载发音辞典…' : '分析歌词 →'}</button></div>
@@ -2020,6 +2222,48 @@ export default function Home() {
         </div>
       )}
 
+      {vocaloidImport && selectedVocaloidTrack && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="svp-import-modal vocaloid-import-modal" role="dialog" aria-modal="true" aria-labelledby="vocaloid-import-title">
+            <button className="modal-close" aria-label="取消导入 VOCALOID 工程" onClick={() => setVocaloidImport(null)}>×</button>
+            <span className="eyebrow">VOCALOID 工程导入</span>
+            <h2 id="vocaloid-import-title">选择要翻填的歌唱轨道</h2>
+            <p>{vocaloidImport.fileName} · {vocaloidImport.project.format} v{vocaloidImport.project.version} · {vocaloidImport.project.tempos.length} 个速度节点 · 原文件只读</p>
+
+            <div className="svp-track-list vocaloid-track-list">
+              {vocaloidImport.project.tracks.map((track) => (
+                <button
+                  className={track.id === vocaloidImport.trackId ? 'selected' : ''}
+                  key={track.id}
+                  onClick={() => setVocaloidImport((current) => current ? { ...current, trackId: track.id, languageMode: track.languageHint } : current)}
+                >
+                  <span><b>{track.name}</b><small>{track.partCount} 个歌唱片段 · {track.detectedLanguage === 'zh' ? '检测到中文' : track.detectedLanguage === 'ja' ? '检测到日语' : track.detectedLanguage === 'latin' ? '罗马音/英语' : '混合歌词'}</small></span>
+                  <span><strong>{track.notes.length}</strong><small>音符 · {formatTime(track.durationSeconds)}</small></span>
+                </button>
+              ))}
+            </div>
+
+            <div className="svp-phrase-setting">
+              <span><b>歌词读法</b><small>中文轨和日语轨通常可自动识别；纯罗马音可手动指定</small></span>
+              <div>{([['auto', '自动'], ['ja', '日语'], ['en', '英语'], ['zh', '中文']] as Array<[VocaloidLanguageMode, string]>).map(([value, label]) => <button className={vocaloidImport.languageMode === value ? 'selected' : ''} key={value} onClick={() => setVocaloidImport((current) => current ? { ...current, languageMode: value } : current)}>{label}</button>)}</div>
+            </div>
+
+            <div className="svp-phrase-setting">
+              <span><b>参考句长</b><small>片段边界和停顿优先，连续旋律到达上限也会断开</small></span>
+              <div>{[12, 18, 24].map((value) => <button className={vocaloidImport.maximumSyllables === value ? 'selected' : ''} key={value} onClick={() => setVocaloidImport((current) => current ? { ...current, maximumSyllables: value } : current)}>{value === 12 ? '短句' : value === 18 ? '常规' : '长句'}</button>)}</div>
+            </div>
+
+            <div className="svp-phrase-setting">
+              <span><b>断句力度</b><small>综合歌唱片段、停顿、标点、文字变化和连续句长</small></span>
+              <div>{([['conservative', '保守'], ['balanced', '标准'], ['strict', '积极']] as Array<[VocaloidSegmentation, string]>).map(([value, label]) => <button className={vocaloidImport.segmentation === value ? 'selected' : ''} key={value} onClick={() => setVocaloidImport((current) => current ? { ...current, segmentation: value } : current)}>{label}</button>)}</div>
+            </div>
+
+            <div className="svp-import-note vocaloid-import-note">当前预计拆成 <b>{estimatedVocaloidPhrases}</b> 句。导入后会保留音高、时值、原歌词与音素；自动断句不满意时仍可在编辑页点音符手动断开或合并。</div>
+            <div className="modal-actions"><button onClick={() => setVocaloidImport(null)}>取消</button><button className="analyze-button" disabled={analyzing} onClick={confirmVocaloidImport}>{analyzing ? '正在读取歌词与音符…' : `导入所选 ${vocaloidImport.project.format} 轨道 →`}</button></div>
+          </section>
+        </div>
+      )}
+
       {tutorialOpen && (
         <div className="modal-backdrop tutorial-backdrop" role="presentation">
           <section className="tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
@@ -2034,7 +2278,7 @@ export default function Home() {
             </div>
 
             <ol className="tutorial-steps">
-              <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、MIDI、SRT 或 LRC。音符句子黏住时，点音符即可手动断句。</small></p></li>
+              <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、VSQX、VPR、MIDI、SRT 或 LRC。音符句子黏住时，点音符即可手动断句。</small></p></li>
               <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
               <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。格子下方会显示拼音，句尾会告诉你是什么韵。</small></p></li>
               <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>
