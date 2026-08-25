@@ -1,7 +1,7 @@
 import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
-import { defineConfig } from 'vite';
+import { defineConfig, Plugin } from 'vite';
 import hostingConfig from './.openai/hosting.json';
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
@@ -11,6 +11,16 @@ const { d1, r2 } = hostingConfig;
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
+
+const serverCmuStub: Plugin = {
+  name: 'server-cmu-stub',
+  enforce: 'pre',
+  resolveId(source) {
+    if (source === 'cmu-pronouncing-dictionary' && this.environment.name !== 'client') {
+      return new URL('./lib/cmu-empty.ts', import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (value) => value.slice(1));
+    }
+  },
+};
 
 const localBindingConfig = {
   main: 'vinext/server/app-router-entry',
@@ -50,6 +60,7 @@ export default defineConfig(async () => {
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
     plugins: [
+      serverCmuStub,
       vinext(),
       sites(),
       cloudflare({
