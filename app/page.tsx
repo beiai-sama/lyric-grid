@@ -50,6 +50,8 @@ import {
   parseVocaloidProject,
   splitVocaloidTrack,
 } from '../lib/vocaloid';
+import { WritableProject } from '../lib/project-export';
+import LabModal, { LabDraftLine } from './lab';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -63,6 +65,7 @@ type LyricLine = ParsedLyricLine & {
 
 type PendingSvpImport = {
   fileName: string;
+  sourceText: string;
   project: SvpProject;
   trackId: string;
   maximumSyllables: number;
@@ -83,6 +86,7 @@ type PendingMidiImport = {
 
 type PendingVocaloidImport = {
   fileName: string;
+  data: ArrayBuffer;
   project: VocaloidProject;
   trackId: string;
   maximumSyllables: number;
@@ -258,6 +262,8 @@ export default function Home() {
   const [svpImport, setSvpImport] = useState<PendingSvpImport | null>(null);
   const [midiImport, setMidiImport] = useState<PendingMidiImport | null>(null);
   const [vocaloidImport, setVocaloidImport] = useState<PendingVocaloidImport | null>(null);
+  const [labOpen, setLabOpen] = useState(false);
+  const [writableProject, setWritableProject] = useState<WritableProject | null>(null);
   const [midiPreviewPlaying, setMidiPreviewPlaying] = useState(false);
   const [midiPreviewTime, setMidiPreviewTime] = useState(0);
   const [selectedSvpNoteId, setSelectedSvpNoteId] = useState('');
@@ -499,7 +505,19 @@ export default function Home() {
 
   useEffect(() => {
     if (!hydrated) return;
-    window.localStorage.setItem(storageKey, JSON.stringify({ phoneticVersion, title: projectTitle, lines, activeId }));
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify({ phoneticVersion, title: projectTitle, lines, activeId }));
+    } catch {
+      const compactLines = lines.map((line) => {
+        const compact = { ...line };
+        delete compact.svp;
+        delete compact.midi;
+        delete compact.vocaloid;
+        return compact;
+      });
+      window.localStorage.setItem(storageKey, JSON.stringify({ phoneticVersion, title: projectTitle, lines: compactLines, activeId }));
+      console.warn('The imported note timeline is too large for localStorage; the lyric draft was saved without project notes.');
+    }
   }, [activeId, hydrated, lines, projectTitle]);
 
   useEffect(() => {
@@ -886,6 +904,7 @@ export default function Home() {
       }));
       rememberUndo('导入歌词');
       setLines(nextLines);
+      setWritableProject(null);
       setActiveId(nextLines[0].id);
       setSelectedCell(0);
       setImportOpen(false);
@@ -1010,10 +1029,12 @@ export default function Home() {
       return;
     }
     try {
-      const project = await parseVocaloidProject(file.name, await file.arrayBuffer());
+      const data = await file.arrayBuffer();
+      const project = await parseVocaloidProject(file.name, data);
       const defaultTrack = project.tracks.reduce((best, track) => track.notes.length > best.notes.length ? track : best);
       setVocaloidImport({
         fileName: file.name,
+        data,
         project,
         trackId: defaultTrack.id,
         maximumSyllables: 18,
@@ -1049,6 +1070,7 @@ export default function Home() {
       setLooping(false);
       setFollowLyrics(true);
       const format = vocaloidImport.project.format;
+      setWritableProject({ kind: 'vocaloid', fileName: vocaloidImport.fileName, sourceBuffer: vocaloidImport.data, trackId: vocaloidImport.trackId });
       setVocaloidImport(null);
       flash(`已从 ${format} 拆出 ${nextLines.length} 句，原工程没有改动`);
     } catch (error) {
@@ -1068,9 +1090,10 @@ export default function Home() {
       return;
     }
     try {
-      const project = parseSvpProject(await file.text());
+      const sourceText = await file.text();
+      const project = parseSvpProject(sourceText);
       const defaultTrack = project.tracks.reduce((best, track) => track.notes.length > best.notes.length ? track : best);
-      setSvpImport({ fileName: file.name, project, trackId: defaultTrack.id, maximumSyllables: 18, segmentation: 'balanced' });
+      setSvpImport({ fileName: file.name, sourceText, project, trackId: defaultTrack.id, maximumSyllables: 18, segmentation: 'balanced' });
       setImportOpen(false);
     } catch (error) {
       console.error(error);
@@ -1095,6 +1118,7 @@ export default function Home() {
       setSubtitleName('');
       setLooping(false);
       setFollowLyrics(true);
+      setWritableProject({ kind: 'svp', fileName: svpImport.fileName, sourceText: svpImport.sourceText, trackId: svpImport.trackId });
       setSvpImport(null);
       flash(`已从 SVP 拆出 ${nextLines.length} 句，原工程没有改动`);
     } catch (error) {
@@ -1170,6 +1194,7 @@ export default function Home() {
       setSubtitleName('');
       setLooping(false);
       setFollowLyrics(true);
+      setWritableProject(null);
       const selectedTrack = midiImport.project.tracks.find((track) => track.id === midiImport.trackId);
       setMidiImport(null);
       flash(selectedTrack?.hasEmbeddedLyrics
@@ -1454,6 +1479,26 @@ export default function Home() {
     flash('项目文件已导出');
   };
 
+  const restoreLabDraft = (draftLines: LabDraftLine[]) => {
+    rememberUndo('恢复实验室版本');
+    setLines((current) => current.map((line, index) => {
+      const draft = draftLines.find((candidate) => candidate.id === line.id) ?? draftLines[index];
+      return draft ? { ...line, target: [...draft.target], tokens: draft.tokens.map((item) => ({ ...item })) } : line;
+    }));
+    flash('已恢复这个版本的歌词与唱法');
+  };
+
+  const seekFromLab = (time: number) => {
+    const next = Math.max(0, Math.min(duration || time, time));
+    if (audioRef.current) audioRef.current.currentTime = next;
+    setCurrentTime(next);
+  };
+
+  const setRateFromLab = (value: number) => {
+    setRate(value);
+    if (audioRef.current) audioRef.current.playbackRate = value;
+  };
+
   const handleBackground = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1569,6 +1614,7 @@ export default function Home() {
         <div className="top-actions">
           <button ref={undoButtonRef} className="button undo-button" disabled={undoDepth === 0} onClick={undoLastChange} title="撤销上一步（Ctrl+Z / ⌘Z）" aria-label={`撤销上一步${undoDepth ? `，还有 ${undoDepth} 步可撤销` : '，当前没有可撤销操作'}`}><span>↶</span><b>撤销</b><kbd>Ctrl Z</kbd></button>
           <button className="help-button" onClick={openTutorial} aria-label="打开新手教程"><span>？</span><b>新手教程</b></button>
+          <button className="button lab-open-button" onClick={() => setLabOpen(true)}><span>⚗</span> 实验室 <em>β</em></button>
           <button className="button button-quiet" onClick={openGlobalPreview}>全局预览</button>
           <button className="button button-ai" onClick={openAiAssistant}>✦ AI 参谋</button>
           <button className="button button-quiet" onClick={() => setAppearanceOpen(true)}>外观</button>
@@ -2262,6 +2308,29 @@ export default function Home() {
             <div className="modal-actions"><button onClick={() => setVocaloidImport(null)}>取消</button><button className="analyze-button" disabled={analyzing} onClick={confirmVocaloidImport}>{analyzing ? '正在读取歌词与音符…' : `导入所选 ${vocaloidImport.project.format} 轨道 →`}</button></div>
           </section>
         </div>
+      )}
+
+      {labOpen && (
+        <LabModal
+          lines={lines}
+          activeId={activeId}
+          projectTitle={projectTitle}
+          currentTime={currentTime}
+          duration={duration}
+          playing={playing}
+          rate={rate}
+          looping={looping}
+          audioAvailable={Boolean(audioUrl)}
+          writableProject={writableProject}
+          onClose={() => setLabOpen(false)}
+          onSelectLine={(id) => { setActiveId(id); setSelectedCell(0); }}
+          onRestoreDraft={restoreLabDraft}
+          onTogglePlay={togglePlay}
+          onSeek={seekFromLab}
+          onRate={setRateFromLab}
+          onLooping={(value) => { setLooping(value); setFollowLyrics(false); }}
+          onNotice={flash}
+        />
       )}
 
       {tutorialOpen && (
