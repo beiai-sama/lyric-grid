@@ -26,6 +26,19 @@ import {
   parseSvpProject,
   splitSvpTrack,
 } from '../lib/svp';
+import {
+  MidiLanguageMode,
+  MidiLineMeta,
+  MidiPolyphonyMode,
+  MidiProject,
+  MidiSegmentation,
+  MidiTextEncoding,
+  importMidiPhrase,
+  importMidiTrack,
+  midiTrackScore,
+  parseMidiProject,
+  splitMidiTrack,
+} from '../lib/midi';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -33,6 +46,7 @@ type LyricLine = ParsedLyricLine & {
   start?: number;
   end?: number;
   svp?: SvpLineMeta;
+  midi?: MidiLineMeta;
 };
 
 type PendingSvpImport = {
@@ -41,6 +55,18 @@ type PendingSvpImport = {
   trackId: string;
   maximumSyllables: number;
   segmentation: SvpSegmentation;
+};
+
+type PendingMidiImport = {
+  fileName: string;
+  data: ArrayBuffer;
+  project: MidiProject;
+  trackId: string;
+  maximumSyllables: number;
+  segmentation: MidiSegmentation;
+  polyphonyMode: MidiPolyphonyMode;
+  languageMode: MidiLanguageMode;
+  encoding: MidiTextEncoding;
 };
 
 type SurfaceStyle = 'solid' | 'frosted' | 'liquid';
@@ -197,7 +223,9 @@ export default function Home() {
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [hideTutorialNextTime, setHideTutorialNextTime] = useState(false);
   const [svpImport, setSvpImport] = useState<PendingSvpImport | null>(null);
+  const [midiImport, setMidiImport] = useState<PendingMidiImport | null>(null);
   const [selectedSvpNoteId, setSelectedSvpNoteId] = useState('');
+  const [selectedMidiNoteId, setSelectedMidiNoteId] = useState('');
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewShowPronunciation, setPreviewShowPronunciation] = useState(true);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
@@ -230,6 +258,7 @@ export default function Home() {
   const fileRef = useRef<HTMLInputElement>(null);
   const subtitleRef = useRef<HTMLInputElement>(null);
   const svpRef = useRef<HTMLInputElement>(null);
+  const midiRef = useRef<HTMLInputElement>(null);
   const backgroundRef = useRef<HTMLInputElement>(null);
   const editorPanelRef = useRef<HTMLElement>(null);
   const lineButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -283,12 +312,31 @@ export default function Home() {
     const track = svpImport.project.tracks.find((candidate) => candidate.id === svpImport.trackId);
     return track ? splitSvpTrack(track, svpImport.maximumSyllables, svpImport.segmentation).length : 0;
   }, [svpImport]);
+  const estimatedMidiPhrases = useMemo(() => {
+    if (!midiImport) return 0;
+    const track = midiImport.project.tracks.find((candidate) => candidate.id === midiImport.trackId);
+    return track ? splitMidiTrack(track, midiImport.maximumSyllables, midiImport.segmentation, midiImport.polyphonyMode).length : 0;
+  }, [midiImport]);
+  const selectedMidiTrack = midiImport?.project.tracks.find((track) => track.id === midiImport.trackId);
   const canMergeNextSvpLine = Boolean(
     activeLine?.svp
     && lines[activeIndex + 1]?.svp
     && lines[activeIndex + 1].svp?.trackName === activeLine.svp.trackName
     && lines[activeIndex + 1].svp?.version === activeLine.svp.version,
   );
+  const canMergeNextMidiLine = Boolean(
+    activeLine?.midi
+    && lines[activeIndex + 1]?.midi
+    && lines[activeIndex + 1].midi?.trackName === activeLine.midi.trackName
+    && lines[activeIndex + 1].midi?.format === activeLine.midi.format,
+  );
+  const activeMidiPitchRange = useMemo(() => {
+    const pitches = activeLine?.midi?.notes.map((note) => note.pitch) ?? [];
+    return {
+      minimum: pitches.length ? Math.min(...pitches) : 60,
+      maximum: pitches.length ? Math.max(...pitches) : 60,
+    };
+  }, [activeLine]);
 
   useEffect(() => {
     let cancelled = false;
@@ -682,6 +730,84 @@ export default function Home() {
     }
   };
 
+  const handleMidi = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = '';
+    if (file.size > 10 * 1024 * 1024) {
+      flash('这个 MIDI 太大了，请先精简到 10MB 以内');
+      return;
+    }
+    try {
+      const data = await file.arrayBuffer();
+      const project = parseMidiProject(data);
+      const defaultTrack = [...project.tracks].sort((left, right) => midiTrackScore(right) - midiTrackScore(left))[0];
+      setMidiImport({
+        fileName: file.name,
+        data,
+        project,
+        trackId: defaultTrack.id,
+        maximumSyllables: 18,
+        segmentation: 'balanced',
+        polyphonyMode: defaultTrack.maxPolyphony > 1 ? 'melody' : 'all',
+        languageMode: 'auto',
+        encoding: 'auto',
+      });
+      setImportOpen(false);
+    } catch (error) {
+      console.error(error);
+      flash(error instanceof Error ? error.message : 'MIDI 文件读取失败');
+    }
+  };
+
+  const changeMidiEncoding = (encoding: MidiTextEncoding) => {
+    if (!midiImport || midiImport.encoding === encoding) return;
+    try {
+      const project = parseMidiProject(midiImport.data, encoding);
+      const selectedTrack = project.tracks.find((track) => track.id === midiImport.trackId)
+        ?? [...project.tracks].sort((left, right) => midiTrackScore(right) - midiTrackScore(left))[0];
+      setMidiImport({ ...midiImport, project, trackId: selectedTrack.id, encoding });
+    } catch (error) {
+      console.error(error);
+      flash('切换文字编码失败，已经保留原来的读取结果');
+    }
+  };
+
+  const confirmMidiImport = async () => {
+    if (!midiImport) return;
+    setAnalyzing(true);
+    try {
+      const imported = await importMidiTrack(
+        midiImport.project,
+        midiImport.trackId,
+        midiImport.maximumSyllables,
+        midiImport.segmentation,
+        midiImport.polyphonyMode,
+        midiImport.languageMode,
+      );
+      const timestamp = Date.now();
+      const nextLines: LyricLine[] = imported.map((line, index) => ({ ...line, id: `midi-${timestamp}-${index}` }));
+      setLines(nextLines);
+      setActiveId(nextLines[0].id);
+      setProjectTitle(midiImport.fileName.replace(/\.midi?$/i, '') || 'MIDI 翻填工程');
+      setSelectedCell(0);
+      setSelectedMidiNoteId('');
+      setSubtitleName('');
+      setLooping(false);
+      setFollowLyrics(true);
+      const selectedTrack = midiImport.project.tracks.find((track) => track.id === midiImport.trackId);
+      setMidiImport(null);
+      flash(selectedTrack?.hasEmbeddedLyrics
+        ? `已按内嵌歌词从 MIDI 拆出 ${nextLines.length} 句`
+        : `已按旋律音符拆出 ${nextLines.length} 句；这个 MIDI 没有内嵌歌词`);
+    } catch (error) {
+      console.error(error);
+      flash(error instanceof Error ? error.message : 'MIDI 轨道分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const splitActiveSvpLine = async () => {
     if (!activeLine.svp || !selectedSvpNoteId) {
       flash('先在 SVP 音符条里点一下新句的第一个音符');
@@ -749,6 +875,68 @@ export default function Home() {
       };
       setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [merged] : line.id === nextLine.id ? [] : [line]));
       setSelectedSvpNoteId('');
+      flash('已与下一句合并');
+    } catch (error) {
+      console.error(error);
+      flash('这两句暂时无法合并');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const splitActiveMidiLine = async () => {
+    if (!activeLine.midi || !selectedMidiNoteId) {
+      flash('先在 MIDI 音符条里点一下新句的第一个音符');
+      return;
+    }
+    const noteIndex = activeLine.midi.notes.findIndex((note) => note.id === selectedMidiNoteId);
+    if (noteIndex <= 0 || noteIndex >= activeLine.midi.notes.length) {
+      flash('请选择中间的实际发音作为下一句开头');
+      return;
+    }
+    const chosenNote = activeLine.midi.notes[noteIndex];
+    if (chosenNote.role !== 'normal' && chosenNote.role !== 'syllable') {
+      flash('续音和换气不能作为句首，请选择后面的实际发音');
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const { notes, ...meta } = activeLine.midi;
+      const [leftGenerated, rightGenerated] = await Promise.all([
+        importMidiPhrase(meta, notes.slice(0, noteIndex), activeIndex),
+        importMidiPhrase(meta, notes.slice(noteIndex), activeIndex + 1),
+      ]);
+      const targetPivot = leftGenerated.target.length;
+      const rightId = `midi-manual-${Date.now()}`;
+      const left: LyricLine = { ...leftGenerated, id: activeLine.id, target: activeLine.target.slice(0, targetPivot) };
+      const rightDraft = activeLine.target.slice(targetPivot);
+      const right: LyricLine = { ...rightGenerated, id: rightId, target: rightDraft.length ? rightDraft : rightGenerated.target };
+      setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [left, right] : [line]));
+      setActiveId(rightId);
+      setSelectedCell(0);
+      setSelectedMidiNoteId('');
+      flash('已从选中 MIDI 音符切成上下两句');
+    } catch (error) {
+      console.error(error);
+      flash('这次断句没有成功，请换一个音符再试');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const mergeNextMidiLine = async () => {
+    const nextLine = lines[activeIndex + 1];
+    if (!activeLine.midi || !nextLine?.midi || !canMergeNextMidiLine) {
+      flash('下一句不是同一条 MIDI 轨道，不能直接合并');
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const { notes, ...meta } = activeLine.midi;
+      const generated = await importMidiPhrase(meta, [...notes, ...nextLine.midi.notes], activeIndex);
+      const merged: LyricLine = { ...generated, id: activeLine.id, target: [...activeLine.target, ...nextLine.target] };
+      setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [merged] : line.id === nextLine.id ? [] : [line]));
+      setSelectedMidiNoteId('');
       flash('已与下一句合并');
     } catch (error) {
       console.error(error);
@@ -908,6 +1096,7 @@ export default function Home() {
   return (
     <main className="app-shell" data-surface={theme.surfaceStyle} style={themeStyle}>
       <input ref={svpRef} type="file" accept=".svp,application/json" onChange={handleSvp} hidden />
+      <input ref={midiRef} type="file" accept=".mid,.midi,audio/midi,audio/x-midi" onChange={handleMidi} hidden />
       <input ref={backgroundRef} type="file" accept="image/*" onChange={handleBackground} hidden />
       <header className="topbar">
         <div className="brand" aria-label="词格 Lyric Grid">
@@ -926,6 +1115,7 @@ export default function Home() {
           <button className="button button-ai" onClick={openAiAssistant}>✦ AI 参谋</button>
           <button className="button button-quiet" onClick={() => setAppearanceOpen(true)}>外观</button>
           <button className="button button-quiet" onClick={() => svpRef.current?.click()}>导入 SVP β</button>
+          <button className="button button-quiet" onClick={() => midiRef.current?.click()}>导入 MIDI</button>
           <button className="button button-quiet" onClick={() => setImportOpen(true)}>导入歌词</button>
           <button className="button button-quiet export-button" onClick={exportProject}>导出</button>
           <button className="button button-primary" onClick={() => setImportOpen(true)}>＋ 新建工程</button>
@@ -951,7 +1141,7 @@ export default function Home() {
                     if (element) lineButtonRefs.current.set(line.id, element);
                     else lineButtonRefs.current.delete(line.id);
                   }}
-                  onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); }}
+                  onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); setSelectedMidiNoteId(''); }}
                 >
                   <span className="line-index">{String(index + 1).padStart(2, '0')}</span>
                   <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}{rhyme?.final && <em> · {rhyme.final} 韵</em>}</small></span>
@@ -1043,7 +1233,43 @@ export default function Home() {
               </div>
             )}
 
-            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
+            {activeLine.midi && (
+              <div className="svp-note-panel midi-note-panel">
+                <div className="svp-note-heading">
+                  <span><b>MIDI 音符</b> · {activeLine.midi.trackName}<small>SMF {activeLine.midi.format} · {activeLine.midi.hasEmbeddedLyrics ? '带内嵌歌词' : '纯旋律估算'} · {formatTime(activeLine.start ?? 0)}–{formatTime(activeLine.end ?? 0)}</small></span>
+                  <div className="svp-note-tools">
+                    <button disabled={!selectedMidiNoteId || analyzing} onClick={splitActiveMidiLine}>从选中音符断句</button>
+                    <button disabled={!canMergeNextMidiLine || analyzing} onClick={mergeNextMidiLine}>与下一句合并</button>
+                  </div>
+                </div>
+                <p className="svp-split-help">自动断句不合适时，点“下一句的第一个发音”，再按“从选中音符断句”。</p>
+                <div className="svp-note-scroll" aria-label="MIDI 音符时间线">
+                  <div className="svp-note-flow">
+                    {activeLine.midi.notes.map((note) => {
+                      const width = Math.max(42, Math.min(112, note.durationSeconds * 92));
+                      const pitchOffset = Math.min(44, (activeMidiPitchRange.maximum - note.pitch) * 2.2);
+                      const selectable = note.role === 'normal' || note.role === 'syllable';
+                      return (
+                        <button
+                          type="button"
+                          className={`svp-note midi-note ${note.role} ${selectedMidiNoteId === note.id ? 'selected' : ''}`}
+                          key={note.id}
+                          style={{ width: `${width}px`, marginTop: `${pitchOffset}px` }}
+                          disabled={!selectable}
+                          onClick={() => setSelectedMidiNoteId((current) => current === note.id ? '' : note.id)}
+                          title={selectable ? `点此把“${note.lyric}”设为下一句开头` : `${note.lyric} · 请选择实际发音音符`}
+                        >
+                          <b>{note.role === 'hold' ? '—' : note.lyric}</b>
+                          <small>{note.role === 'hold' ? '续音' : note.role === 'breath' ? '换气' : `M${note.pitch} · ${Math.round(note.durationSeconds * 1000)}ms`}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
           </section>
 
           <section className="editor-section target-section">
@@ -1335,7 +1561,10 @@ export default function Home() {
             <p>每一行会作为一句。支持日语、英语和日英混合歌词。</p>
             <textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={'どうして どうして 私だけ\n乾燥し切った眼でlove-la-villain'} autoFocus />
             <div className="modal-help"><span>日语</span> 自动生成假名和分格罗马音 <span>英语</span> 自动生成 IPA，可按原唱修改</div>
-            <button className="svp-import-shortcut" onClick={() => svpRef.current?.click()}>已有 SynthV 工程？导入 SVP β</button>
+            <div className="project-import-shortcuts">
+              <button className="svp-import-shortcut" onClick={() => svpRef.current?.click()}>已有 SynthV 工程？导入 SVP β</button>
+              <button className="svp-import-shortcut midi-import-shortcut" onClick={() => midiRef.current?.click()}>有旋律文件？导入 MIDI</button>
+            </div>
             <div className="modal-actions"><button onClick={() => setImportOpen(false)}>取消</button><button className="analyze-button" disabled={!importText.trim() || analyzing} onClick={analyzeLyrics}>{analyzing ? '正在加载发音辞典…' : '分析歌词 →'}</button></div>
           </section>
         </div>
@@ -1378,6 +1607,68 @@ export default function Home() {
         </div>
       )}
 
+      {midiImport && selectedMidiTrack && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="svp-import-modal midi-import-modal" role="dialog" aria-modal="true" aria-labelledby="midi-import-title">
+            <button className="modal-close" aria-label="取消导入 MIDI" onClick={() => setMidiImport(null)}>×</button>
+            <span className="eyebrow">标准 MIDI 0 / 1 导入</span>
+            <h2 id="midi-import-title">选择旋律或歌唱轨道</h2>
+            <p>{midiImport.fileName} · SMF {midiImport.project.format} · {midiImport.project.tempos.length} 个速度节点 · 原文件只读</p>
+
+            <div className="svp-track-list midi-track-list">
+              {midiImport.project.tracks.map((track) => (
+                <button
+                  className={track.id === midiImport.trackId ? 'selected' : ''}
+                  key={track.id}
+                  onClick={() => setMidiImport((current) => current ? { ...current, trackId: track.id, polyphonyMode: track.maxPolyphony > 1 ? 'melody' : 'all' } : current)}
+                >
+                  <span>
+                    <b>{track.name}</b>
+                    <small>{track.hasEmbeddedLyrics ? `${track.embeddedLyricCount} 个内嵌歌词` : '没有内嵌歌词'} · {track.maxPolyphony > 1 ? `最多 ${track.maxPolyphony} 音复音` : '单旋律'}</small>
+                    <em className={track.hasEmbeddedLyrics ? 'has-lyrics' : ''}>{track.detectedLanguage === 'zh' ? '中文' : track.detectedLanguage === 'ja' ? '日语' : track.detectedLanguage === 'latin' ? '拉丁字母' : '旋律轨'}</em>
+                  </span>
+                  <span><strong>{track.notes.length}</strong><small>音符 · {formatTime(track.durationSeconds)}</small></span>
+                </button>
+              ))}
+            </div>
+
+            {!selectedMidiTrack.hasEmbeddedLyrics && (
+              <div className="midi-warning-note"><b>这条轨道没有歌词</b><span>仍然可以导入：词格会按音符与停顿生成空白旋律句，发音暂用 la，占位内容可在“编辑唱法”里改。</span></div>
+            )}
+
+            <div className="svp-phrase-setting">
+              <span><b>歌词读法</b><small>拉丁字母默认保留原样；确认是英语时可转成英文发音</small></span>
+              <div>{([['auto', '自动'], ['ja', '日语'], ['en', '英语'], ['zh', '中文']] as Array<[MidiLanguageMode, string]>).map(([value, label]) => <button className={midiImport.languageMode === value ? 'selected' : ''} key={value} onClick={() => setMidiImport((current) => current ? { ...current, languageMode: value } : current)}>{label}</button>)}</div>
+            </div>
+
+            <div className="svp-phrase-setting">
+              <span><b>文字编码</b><small>轨道名或旧工程歌词乱码时再切换</small></span>
+              <div>{([['auto', '自动'], ['utf-8', 'UTF-8'], ['shift_jis', '日文旧制'], ['gb18030', '中文旧制']] as Array<[MidiTextEncoding, string]>).map(([value, label]) => <button className={midiImport.encoding === value ? 'selected' : ''} key={value} onClick={() => changeMidiEncoding(value)}>{label}</button>)}</div>
+            </div>
+
+            {selectedMidiTrack.maxPolyphony > 1 && (
+              <div className="svp-phrase-setting midi-polyphony-setting">
+                <span><b>复音处理</b><small>和弦轨建议提取最高旋律；人声多声部才保留全部</small></span>
+                <div>{([['melody', '提取最高旋律'], ['all', '保留全部音符']] as Array<[MidiPolyphonyMode, string]>).map(([value, label]) => <button className={midiImport.polyphonyMode === value ? 'selected' : ''} key={value} onClick={() => setMidiImport((current) => current ? { ...current, polyphonyMode: value } : current)}>{label}</button>)}</div>
+              </div>
+            )}
+
+            <div className="svp-phrase-setting">
+              <span><b>参考句长</b><small>优先依据停顿切句，连续旋律过长时才强制分段</small></span>
+              <div>{[12, 18, 24].map((value) => <button className={midiImport.maximumSyllables === value ? 'selected' : ''} key={value} onClick={() => setMidiImport((current) => current ? { ...current, maximumSyllables: value } : current)}>{value === 12 ? '短句' : value === 18 ? '常规' : '长句'}</button>)}</div>
+            </div>
+
+            <div className="svp-phrase-setting">
+              <span><b>断句力度</b><small>综合音符间隔、歌词标点、换行标记和句长</small></span>
+              <div>{([['conservative', '保守'], ['balanced', '标准'], ['strict', '积极']] as Array<[MidiSegmentation, string]>).map(([value, label]) => <button className={midiImport.segmentation === value ? 'selected' : ''} key={value} onClick={() => setMidiImport((current) => current ? { ...current, segmentation: value } : current)}>{label}</button>)}</div>
+            </div>
+
+            <div className="svp-import-note midi-import-note">当前预计拆成 <b>{estimatedMidiPhrases}</b> 句。导入后保留音符时间轴，可以继续手动断句和合并；MIDI 不含歌曲音频，试听仍需单独上传。</div>
+            <div className="modal-actions"><button onClick={() => setMidiImport(null)}>取消</button><button className="analyze-button" disabled={analyzing} onClick={confirmMidiImport}>{analyzing ? '正在对齐歌词与音符…' : '导入所选 MIDI 轨道 →'}</button></div>
+          </section>
+        </div>
+      )}
+
       {tutorialOpen && (
         <div className="modal-backdrop tutorial-backdrop" role="presentation">
           <section className="tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
@@ -1392,7 +1683,7 @@ export default function Home() {
             </div>
 
             <ol className="tutorial-steps">
-              <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、SRT 或 LRC。SVP 句子黏住时，点音符即可手动断句。</small></p></li>
+              <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、MIDI、SRT 或 LRC。音符句子黏住时，点音符即可手动断句。</small></p></li>
               <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
               <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。格子下方会显示拼音，句尾会告诉你是什么韵。</small></p></li>
               <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>
