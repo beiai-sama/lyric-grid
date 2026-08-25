@@ -272,6 +272,7 @@ export default function Home() {
   const backgroundRef = useRef<HTMLInputElement>(null);
   const editorPanelRef = useRef<HTMLElement>(null);
   const lineButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const previewLineRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const activeIndex = lines.findIndex((line) => line.id === activeId);
   const activeLine = lines[activeIndex] ?? lines[0];
@@ -297,6 +298,11 @@ export default function Home() {
     const commonRhymes = [...rhymeCounts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 4);
     return { completed, commonRhymes };
   }, [lineRhymes, lines]);
+  const timedLineCount = useMemo(() => lines.filter((line) => line.start != null).length, [lines]);
+  const activeLineProgress = activeLine?.start != null && activeLine.end != null && activeLine.end > activeLine.start
+    ? Math.min(1, Math.max(0, (currentTime - activeLine.start) / (activeLine.end - activeLine.start)))
+    : 0;
+  const lrcProgressStyle = { '--lrc-progress': `${Math.round(activeLineProgress * 1000) / 10}%` } as CSSProperties;
   const aiOathMatched = aiOathInput.trim() === aiOathText;
   const aiOathProgress = Array.from(aiOathText).findIndex((character, index) => aiOathInput[index] !== character);
   const aiOathMatchedLength = aiOathProgress === -1 ? Math.min(aiOathInput.length, aiOathText.length) : aiOathProgress;
@@ -490,7 +496,24 @@ export default function Home() {
     if (!followLyrics || !playing) return;
     lineButtonRefs.current.get(activeId)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     editorPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [activeId, followLyrics, playing]);
+    if (previewOpen) previewLineRefs.current.get(activeId)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [activeId, followLyrics, playing, previewOpen]);
+
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    let lastPaint = 0;
+    const paintProgress = (timestamp: number) => {
+      if (timestamp - lastPaint >= 80) {
+        lastPaint = timestamp;
+        const audio = audioRef.current;
+        if (audio) setCurrentTime(audio.currentTime);
+      }
+      frame = window.requestAnimationFrame(paintProgress);
+    };
+    frame = window.requestAnimationFrame(paintProgress);
+    return () => window.cancelAnimationFrame(frame);
+  }, [playing]);
 
   const updateActiveLine = (updater: (line: LyricLine) => LyricLine) => {
     setLines((current) => current.map((line) => line.id === activeId ? updater(line) : line));
@@ -621,6 +644,14 @@ export default function Home() {
     if (hideTutorialNextTime) window.localStorage.setItem(tutorialStorageKey, '1');
     else window.localStorage.removeItem(tutorialStorageKey);
     setTutorialOpen(false);
+  };
+
+  const openGlobalPreview = () => {
+    setPreviewOpen(true);
+    if (timedLineCount > 0) {
+      setLooping(false);
+      setFollowLyrics(true);
+    }
   };
 
   const startPronunciationEdit = () => {
@@ -1108,12 +1139,23 @@ export default function Home() {
 
   const togglePlay = async () => {
     const audio = audioRef.current;
-    if (!audio) {
+    if (!audio || !audioUrl) {
       fileRef.current?.click();
       return;
     }
     if (audio.paused) await audio.play();
     else audio.pause();
+  };
+
+  const togglePreviewPlayback = async () => {
+    setLooping(false);
+    setFollowLyrics(true);
+    try {
+      await togglePlay();
+    } catch (error) {
+      console.error(error);
+      flash('浏览器没有开始播放，请再点一次播放按钮');
+    }
   };
 
   const handleTimeUpdate = () => {
@@ -1130,6 +1172,9 @@ export default function Home() {
       if (nextLine && nextLine.id !== activeId) {
         setActiveId(nextLine.id);
         setSelectedCell(0);
+        setSelectedSvpNoteId('');
+        setSelectedMidiNoteId('');
+        setEditingPronunciation(false);
       }
     }
     setCurrentTime(audio.currentTime);
@@ -1271,7 +1316,7 @@ export default function Home() {
         </label>
         <div className="top-actions">
           <button className="help-button" onClick={openTutorial} aria-label="打开新手教程"><span>？</span><b>新手教程</b></button>
-          <button className="button button-quiet" onClick={() => setPreviewOpen(true)}>全局预览</button>
+          <button className="button button-quiet" onClick={openGlobalPreview}>全局预览</button>
           <button className="button button-ai" onClick={openAiAssistant}>✦ AI 参谋</button>
           <button className="button button-quiet" onClick={() => setAppearanceOpen(true)}>外观</button>
           <button className="button button-quiet" onClick={() => svpRef.current?.click()}>导入 SVP β</button>
@@ -1295,8 +1340,9 @@ export default function Home() {
               const rhyme = lineRhymes.get(line.id);
               return (
                 <button
-                  className={`line-item ${line.id === activeId ? 'active' : ''}`}
+                  className={`line-item ${line.id === activeId ? 'active' : ''} ${line.id === activeId && followLyrics && playing ? 'lrc-current' : ''}`}
                   key={line.id}
+                  style={line.id === activeId ? lrcProgressStyle : undefined}
                   ref={(element) => {
                     if (element) lineButtonRefs.current.set(line.id, element);
                     else lineButtonRefs.current.delete(line.id);
@@ -1315,7 +1361,14 @@ export default function Home() {
         </aside>
 
         <section className="editor-panel" ref={editorPanelRef}>
-          <div className="editor-heading">
+          {followLyrics && timedLineCount > 0 && (
+            <div className={`editor-lrc-status ${playing ? 'playing' : ''}`} style={lrcProgressStyle}>
+              <span><i />LRC 跟随{playing ? '中' : '已就绪'}</span>
+              <div><i /></div>
+              <b>{String(activeIndex + 1).padStart(2, '0')} / {String(lines.length).padStart(2, '0')}</b>
+            </div>
+          )}
+          <div className={`editor-heading ${followLyrics && playing ? 'lrc-entering' : ''}`} key={`heading-${activeLine.id}`}>
             <div>
               <span className="eyebrow">第 {String(activeIndex + 1).padStart(2, '0')} 句 · {languageLabel[activeLine.language]}{activeLine.uncertain ? ' · 需试听' : ''}</span>
               <h1 lang="ja">{activeLine.source}</h1>
@@ -1327,7 +1380,7 @@ export default function Home() {
             </div>
           </div>
 
-          <section className="editor-section pronunciation-section">
+          <section className={`editor-section pronunciation-section ${followLyrics && playing ? 'lrc-entering' : ''}`} key={`pronunciation-${activeLine.id}`}>
             <div className="section-title-row">
               <div><span className="step-number">01</span><h2>实际唱法</h2><p>连读自动合格；“可连”位置可点一下确认</p></div>
               <div className="section-actions">
@@ -1432,7 +1485,7 @@ export default function Home() {
             <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
           </section>
 
-          <section className="editor-section target-section">
+          <section className={`editor-section target-section ${followLyrics && playing ? 'lrc-entering lrc-entering-late' : ''}`} key={`target-${activeLine.id}`}>
             <div className="section-title-row">
               <div><span className="step-number">02</span><h2>中文填词</h2><p>填字后显示拼音；句尾自动标出韵脚</p></div>
               <div className="mini-toolbar" aria-label="编辑工具">
@@ -1503,7 +1556,7 @@ export default function Home() {
           <section className="preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
             <button className="modal-close" aria-label="关闭全局预览" onClick={() => setPreviewOpen(false)}>×</button>
             <div className="preview-header">
-              <div><span className="eyebrow">整首翻填总览</span><h2 id="preview-title">{projectTitle}</h2><p>从头看到尾，检查字数、句尾和整体押韵。</p></div>
+              <div><span className="eyebrow">整首翻填总览</span><h2 id="preview-title">{projectTitle}</h2><p>播放音频时会跟随 LRC 自动滚动，也可以停下来检查押韵。</p></div>
               <div className="preview-stats"><span><b>{lines.length}</b> 句</span><span><b>{previewStats.completed}</b> 已填</span><span><b>{lines.length - previewStats.completed}</b> 待填</span></div>
             </div>
             <div className="preview-toolbar">
@@ -1514,15 +1567,36 @@ export default function Home() {
                   ? previewStats.commonRhymes.map(([rhyme, count]) => <b key={rhyme}>{rhyme} · {count}</b>)
                   : <small>填几句中文后自动汇总</small>}
               </div>
+              <button className={`preview-play-button ${playing ? 'playing' : ''}`} onClick={() => void togglePreviewPlayback()}>{playing ? 'Ⅱ 暂停跟随' : audioUrl ? '▶ 跟随播放' : '＋ 上传音频'}</button>
               <button onClick={copyLyrics}>复制中文歌词</button>
             </div>
+            {followLyrics && activeLine.start != null && (
+              <div className={`preview-now-playing ${playing ? 'playing' : ''}`} key={`preview-now-${activeLine.id}`} style={lrcProgressStyle}>
+                <div className="preview-now-heading"><span><i />{playing ? 'NOW PLAYING' : 'LRC READY'}</span><b>{formatTime(currentTime)}</b></div>
+                <p lang="ja">{activeLine.source}</p>
+                <strong aria-label={activeLine.target.map((cell) => cell || '空格').join('')}>
+                  {activeLine.target.map((cell, index) => <span key={`${activeLine.id}-karaoke-${index}`} style={{ '--character-delay': `${Math.min(index * 32, 420)}ms` } as CSSProperties}>{cell || '□'}</span>)}
+                </strong>
+                {previewShowPronunciation && <small>{chinesePronunciation.cells.map((cell) => cell?.syllable ?? '·').join(' ')}</small>}
+                <div className="preview-now-progress"><i /></div>
+              </div>
+            )}
             <div className="preview-list">
               {lines.map((line, index) => {
                 const chinese = analyzeChineseCells(line.target);
                 const target = line.target.map((cell) => cell || '□').join('');
                 const hasDraft = line.target.some((cell) => cell.trim() && cell !== '—');
                 return (
-                  <button className={`preview-line ${line.id === activeId ? 'active' : ''}`} key={line.id} onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); setPreviewOpen(false); }}>
+                  <button
+                    className={`preview-line ${line.id === activeId ? 'active' : ''} ${line.id === activeId && followLyrics && playing ? 'lrc-current' : ''}`}
+                    key={line.id}
+                    ref={(element) => {
+                      if (element) previewLineRefs.current.set(line.id, element);
+                      else previewLineRefs.current.delete(line.id);
+                    }}
+                    style={line.id === activeId ? lrcProgressStyle : undefined}
+                    onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); setPreviewOpen(false); }}
+                  >
                     <span className="preview-line-index">{String(index + 1).padStart(2, '0')}</span>
                     <span className="preview-line-body">
                       <span className="preview-source" lang="ja">{line.source}</span>
