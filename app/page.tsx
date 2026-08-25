@@ -70,6 +70,17 @@ type PendingMidiImport = {
   encoding: MidiTextEncoding;
 };
 
+type UndoSnapshot = {
+  label: string;
+  lines: LyricLine[];
+  activeId: string;
+  selectedCell: number;
+  projectTitle: string;
+  subtitleName: string;
+  looping: boolean;
+  followLyrics: boolean;
+};
+
 type SurfaceStyle = 'solid' | 'frosted' | 'liquid';
 
 type ThemeConfig = {
@@ -219,6 +230,7 @@ export default function Home() {
   const [editingPronunciation, setEditingPronunciation] = useState(false);
   const [manualPronunciation, setManualPronunciation] = useState('');
   const [importOpen, setImportOpen] = useState(false);
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
   const [importText, setImportText] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
@@ -247,6 +259,7 @@ export default function Home() {
   const [aiResult, setAiResult] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [notice, setNotice] = useState('');
+  const [undoDepth, setUndoDepth] = useState(0);
   const [hydrated, setHydrated] = useState(false);
   const [audioUrl, setAudioUrl] = useState('');
   const [audioName, setAudioName] = useState('');
@@ -273,6 +286,10 @@ export default function Home() {
   const editorPanelRef = useRef<HTMLElement>(null);
   const lineButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const previewLineRefs = useRef(new Map<string, HTMLButtonElement>());
+  const undoStackRef = useRef<UndoSnapshot[]>([]);
+  const undoButtonRef = useRef<HTMLButtonElement>(null);
+  const importMenuRef = useRef<HTMLDivElement>(null);
+  const lineIdCounterRef = useRef(0);
 
   const activeIndex = lines.findIndex((line) => line.id === activeId);
   const activeLine = lines[activeIndex] ?? lines[0];
@@ -515,7 +532,39 @@ export default function Home() {
     return () => window.cancelAnimationFrame(frame);
   }, [playing]);
 
-  const updateActiveLine = (updater: (line: LyricLine) => LyricLine) => {
+  useEffect(() => {
+    if (!importMenuOpen) return;
+    const closeImportMenu = (event: PointerEvent) => {
+      if (!importMenuRef.current?.contains(event.target as Node)) setImportMenuOpen(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setImportMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeImportMenu);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeImportMenu);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [importMenuOpen]);
+
+  const rememberUndo = (label: string) => {
+    undoStackRef.current.push({ label, lines, activeId, selectedCell, projectTitle, subtitleName, looping, followLyrics });
+    if (undoStackRef.current.length > 80) undoStackRef.current.shift();
+    setUndoDepth(undoStackRef.current.length);
+  };
+
+  const nextLineId = (prefix: string) => {
+    let candidate = '';
+    do {
+      lineIdCounterRef.current += 1;
+      candidate = `${prefix}-${lineIdCounterRef.current.toString(36)}`;
+    } while (lines.some((line) => line.id === candidate));
+    return candidate;
+  };
+
+  const updateActiveLine = (updater: (line: LyricLine) => LyricLine, undoLabel = '编辑当前歌词') => {
+    rememberUndo(undoLabel);
     setLines((current) => current.map((line) => line.id === activeId ? updater(line) : line));
   };
 
@@ -523,6 +572,38 @@ export default function Home() {
     setNotice(message);
     window.setTimeout(() => setNotice(''), 1800);
   };
+
+  const undoLastChange = () => {
+    const snapshot = undoStackRef.current.pop();
+    if (!snapshot) {
+      flash('现在没有可以撤销的操作');
+      return;
+    }
+    setLines(snapshot.lines);
+    setActiveId(snapshot.activeId);
+    setSelectedCell(snapshot.selectedCell);
+    setProjectTitle(snapshot.projectTitle);
+    setSubtitleName(snapshot.subtitleName);
+    setLooping(snapshot.looping);
+    setFollowLyrics(snapshot.followLyrics);
+    setSelectedSvpNoteId('');
+    setSelectedMidiNoteId('');
+    setEditingPronunciation(false);
+    setUndoDepth(undoStackRef.current.length);
+    flash(`已撤销：${snapshot.label}`);
+  };
+
+  useEffect(() => {
+    const handleUndoShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'z') return;
+      const target = event.target;
+      if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) && !target.closest('.lyric-cell')) return;
+      event.preventDefault();
+      undoButtonRef.current?.click();
+    };
+    window.addEventListener('keydown', handleUndoShortcut);
+    return () => window.removeEventListener('keydown', handleUndoShortcut);
+  }, []);
 
   const silenceMidiPreview = () => {
     midiPreviewPlayingRef.current = false;
@@ -662,7 +743,7 @@ export default function Home() {
 
   const savePronunciation = () => {
     const tokens = manualPronunciationToTokens(manualPronunciation);
-    updateActiveLine((line) => ({ ...line, tokens, uncertain: false }));
+    updateActiveLine((line) => ({ ...line, tokens, uncertain: false }), '修改实际唱法');
     setEditingPronunciation(false);
     flash('实际唱法已更新');
   };
@@ -697,15 +778,15 @@ export default function Home() {
           return [{ ...tokenItem, counted: !tokenItem.counted, kind: tokenItem.counted ? 'absorbed' : 'normal' }];
         }),
       };
-    });
+    }, '调整发音格');
   };
 
-  const updateCell = (index: number, value: string) => {
+  const updateCell = (index: number, value: string, undoLabel = '填写中文词格') => {
     const character = Array.from(value).slice(-1)[0] ?? '';
     updateActiveLine((line) => ({
       ...line,
       target: line.target.map((cell, cellIndex) => cellIndex === index ? character : cell),
-    }));
+    }), undoLabel);
   };
 
   const pasteCells = (index: number, text: string) => {
@@ -715,7 +796,7 @@ export default function Home() {
       const target = [...line.target];
       characters.forEach((character, offset) => { target[index + offset] = character; });
       return { ...line, target };
-    });
+    }, '粘贴中文歌词');
     setSelectedCell(index + characters.length - 1);
   };
 
@@ -724,7 +805,7 @@ export default function Home() {
       const target = [...line.target];
       target.splice(Math.min(selectedCell + 1, target.length), 0, '—');
       return { ...line, target };
-    });
+    }, '添加延音');
     setSelectedCell((value) => value + 1);
   };
 
@@ -733,20 +814,20 @@ export default function Home() {
       const target = [...line.target];
       target.splice(Math.min(selectedCell + 1, target.length), 0, '');
       return { ...line, target };
-    });
+    }, '拆分词格');
     setSelectedCell((value) => value + 1);
   };
 
   const mergeCell = () => {
     if (selectedCell < 0) return;
-    updateCell(selectedCell, '—');
+    updateCell(selectedCell, '—', '合并为延音');
   };
 
   const removeCell = () => {
     updateActiveLine((line) => ({
       ...line,
       target: line.target.length > 1 ? line.target.filter((_, index) => index !== selectedCell) : line.target,
-    }));
+    }), '删除词格');
     setSelectedCell((value) => Math.max(0, value - 1));
   };
 
@@ -758,9 +839,10 @@ export default function Home() {
       const parsed = await Promise.all(sourceLines.map((line, index) => parseLyricLine(line, index)));
       const nextLines: LyricLine[] = parsed.map((line, index) => ({
         ...line,
-        id: `line-${Date.now()}-${index}`,
+        id: `${nextLineId('line')}-${index}`,
         target: Array.from({ length: Math.max(1, baseCount(line.tokens)) }, () => ''),
       }));
+      rememberUndo('导入歌词');
       setLines(nextLines);
       setActiveId(nextLines[0].id);
       setSelectedCell(0);
@@ -840,6 +922,7 @@ export default function Home() {
             target: recognizedTarget.length ? recognizedTarget : line.target,
           };
         });
+        rememberUndo(`导入 ${formatLabel} 时间轴`);
         setLines(nextLines);
         const firstTimedLine = nextLines.find((line) => line.start != null);
         if (firstTimedLine) setActiveId(firstTimedLine.id);
@@ -851,12 +934,13 @@ export default function Home() {
           const target = recognized.target ? targetTextToCells(recognized.target) : [];
           return {
             ...lyric,
-            id: `srt-${Date.now()}-${index}`,
+            id: `${nextLineId('srt')}-${index}`,
             start: cue.start,
             end: cue.end,
             target: target.length ? target : Array.from({ length: Math.max(1, baseCount(lyric.tokens)) }, () => ''),
           } satisfies LyricLine;
         }));
+        rememberUndo(`从 ${formatLabel} 新建工程`);
         setLines(parsed);
         setActiveId(parsed[0].id);
         setProjectTitle(file.name.replace(/\.(srt|str|lrc)$/i, '') || '字幕翻填工程');
@@ -899,11 +983,11 @@ export default function Home() {
     setAnalyzing(true);
     try {
       const imported = await importSvpTrack(svpImport.project, svpImport.trackId, svpImport.maximumSyllables, svpImport.segmentation);
-      const timestamp = Date.now();
       const nextLines: LyricLine[] = imported.map((line, index) => ({
         ...line,
-        id: `svp-${timestamp}-${index}`,
+        id: `${nextLineId('svp')}-${index}`,
       }));
+      rememberUndo('导入 SVP 工程');
       setLines(nextLines);
       setActiveId(nextLines[0].id);
       setProjectTitle(svpImport.fileName.replace(/\.svp$/i, '') || 'SVP 翻填工程');
@@ -976,8 +1060,8 @@ export default function Home() {
         midiImport.polyphonyMode,
         midiImport.languageMode,
       );
-      const timestamp = Date.now();
-      const nextLines: LyricLine[] = imported.map((line, index) => ({ ...line, id: `midi-${timestamp}-${index}` }));
+      const nextLines: LyricLine[] = imported.map((line, index) => ({ ...line, id: `${nextLineId('midi')}-${index}` }));
+      rememberUndo('导入 MIDI 工程');
       setLines(nextLines);
       setActiveId(nextLines[0].id);
       setProjectTitle(midiImport.fileName.replace(/\.midi?$/i, '') || 'MIDI 翻填工程');
@@ -1025,7 +1109,7 @@ export default function Home() {
       const targetPivot = leftGenerated.target.length;
       const leftDraft = activeLine.target.slice(0, targetPivot);
       const rightDraft = activeLine.target.slice(targetPivot);
-      const rightId = `svp-manual-${Date.now()}`;
+      const rightId = nextLineId('svp-manual');
       const left: LyricLine = {
         ...leftGenerated,
         id: activeLine.id,
@@ -1036,6 +1120,7 @@ export default function Home() {
         id: rightId,
         target: rightDraft.length ? rightDraft : rightGenerated.target,
       };
+      rememberUndo('拆分 SVP 句子');
       setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [left, right] : [line]));
       setActiveId(rightId);
       setSelectedCell(0);
@@ -1064,6 +1149,7 @@ export default function Home() {
         id: activeLine.id,
         target: [...activeLine.target, ...nextLine.target],
       };
+      rememberUndo('合并 SVP 句子');
       setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [merged] : line.id === nextLine.id ? [] : [line]));
       setSelectedSvpNoteId('');
       flash('已与下一句合并');
@@ -1098,10 +1184,11 @@ export default function Home() {
         importMidiPhrase(meta, notes.slice(noteIndex), activeIndex + 1),
       ]);
       const targetPivot = leftGenerated.target.length;
-      const rightId = `midi-manual-${Date.now()}`;
+      const rightId = nextLineId('midi-manual');
       const left: LyricLine = { ...leftGenerated, id: activeLine.id, target: activeLine.target.slice(0, targetPivot) };
       const rightDraft = activeLine.target.slice(targetPivot);
       const right: LyricLine = { ...rightGenerated, id: rightId, target: rightDraft.length ? rightDraft : rightGenerated.target };
+      rememberUndo('拆分 MIDI 句子');
       setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [left, right] : [line]));
       setActiveId(rightId);
       setSelectedCell(0);
@@ -1126,6 +1213,7 @@ export default function Home() {
       const { notes, ...meta } = activeLine.midi;
       const generated = await importMidiPhrase(meta, [...notes, ...nextLine.midi.notes], activeIndex);
       const merged: LyricLine = { ...generated, id: activeLine.id, target: [...activeLine.target, ...nextLine.target] };
+      rememberUndo('合并 MIDI 句子');
       setLines((current) => current.flatMap((line) => line.id === activeLine.id ? [merged] : line.id === nextLine.id ? [] : [line]));
       setSelectedMidiNoteId('');
       flash('已与下一句合并');
@@ -1188,7 +1276,7 @@ export default function Home() {
   };
 
   const setMarker = (kind: 'start' | 'end') => {
-    updateActiveLine((line) => ({ ...line, [kind]: currentTime }));
+    updateActiveLine((line) => ({ ...line, [kind]: currentTime }), kind === 'start' ? '修改句首时间' : '修改句尾时间');
     flash(kind === 'start' ? '已设为本句句首' : '已设为本句句尾');
   };
 
@@ -1315,13 +1403,21 @@ export default function Home() {
           <span className="saved-label">{hydrated ? '已保存到本机' : '正在读取'}</span>
         </label>
         <div className="top-actions">
+          <button ref={undoButtonRef} className="button undo-button" disabled={undoDepth === 0} onClick={undoLastChange} title="撤销上一步（Ctrl+Z / ⌘Z）" aria-label={`撤销上一步${undoDepth ? `，还有 ${undoDepth} 步可撤销` : '，当前没有可撤销操作'}`}><span>↶</span><b>撤销</b><kbd>Ctrl Z</kbd></button>
           <button className="help-button" onClick={openTutorial} aria-label="打开新手教程"><span>？</span><b>新手教程</b></button>
           <button className="button button-quiet" onClick={openGlobalPreview}>全局预览</button>
           <button className="button button-ai" onClick={openAiAssistant}>✦ AI 参谋</button>
           <button className="button button-quiet" onClick={() => setAppearanceOpen(true)}>外观</button>
-          <button className="button button-quiet" onClick={() => svpRef.current?.click()}>导入 SVP β</button>
-          <button className="button button-quiet" onClick={() => midiRef.current?.click()}>导入 MIDI</button>
-          <button className="button button-quiet" onClick={() => setImportOpen(true)}>导入歌词</button>
+          <div className="top-import-menu" ref={importMenuRef}>
+            <button className={`button import-menu-trigger ${importMenuOpen ? 'active' : ''}`} aria-haspopup="menu" aria-expanded={importMenuOpen} onClick={() => setImportMenuOpen((value) => !value)}>导入 <span>⌄</span></button>
+            {importMenuOpen && (
+              <div className="import-menu-popover" role="menu" aria-label="选择导入类型">
+                <button role="menuitem" onClick={() => { setImportMenuOpen(false); svpRef.current?.click(); }}><span className="import-kind svp">SVP</span><p><b>SVP 工程</b><small>读取歌唱轨、音符与歌词</small></p><em>测试中</em></button>
+                <button role="menuitem" onClick={() => { setImportMenuOpen(false); midiRef.current?.click(); }}><span className="import-kind midi">MID</span><p><b>MIDI 旋律</b><small>选轨、试听并按音符拆句</small></p></button>
+                <button role="menuitem" onClick={() => { setImportMenuOpen(false); setImportOpen(true); }}><span className="import-kind text">TXT</span><p><b>歌词文本</b><small>粘贴日语或英语歌词</small></p></button>
+              </div>
+            )}
+          </div>
           <button className="button button-quiet export-button" onClick={exportProject}>导出</button>
           <button className="button button-primary" onClick={() => setImportOpen(true)}>＋ 新建工程</button>
         </div>
