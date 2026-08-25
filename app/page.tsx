@@ -35,6 +35,7 @@ import {
   MidiTextEncoding,
   importMidiPhrase,
   importMidiTrack,
+  midiNotesForMode,
   midiTrackScore,
   parseMidiProject,
   splitMidiTrack,
@@ -224,6 +225,8 @@ export default function Home() {
   const [hideTutorialNextTime, setHideTutorialNextTime] = useState(false);
   const [svpImport, setSvpImport] = useState<PendingSvpImport | null>(null);
   const [midiImport, setMidiImport] = useState<PendingMidiImport | null>(null);
+  const [midiPreviewPlaying, setMidiPreviewPlaying] = useState(false);
+  const [midiPreviewTime, setMidiPreviewTime] = useState(0);
   const [selectedSvpNoteId, setSelectedSvpNoteId] = useState('');
   const [selectedMidiNoteId, setSelectedMidiNoteId] = useState('');
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -259,6 +262,13 @@ export default function Home() {
   const subtitleRef = useRef<HTMLInputElement>(null);
   const svpRef = useRef<HTMLInputElement>(null);
   const midiRef = useRef<HTMLInputElement>(null);
+  const midiAudioContextRef = useRef<AudioContext | null>(null);
+  const midiPreviewFrameRef = useRef<number | null>(null);
+  const midiPreviewVoicesRef = useRef(new Set<OscillatorNode>());
+  const midiPreviewPlayingRef = useRef(false);
+  const midiPreviewOffsetRef = useRef(0);
+  const midiPreviewStartedAtRef = useRef(0);
+  const midiPreviewCursorRef = useRef(0);
   const backgroundRef = useRef<HTMLInputElement>(null);
   const editorPanelRef = useRef<HTMLElement>(null);
   const lineButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -318,6 +328,14 @@ export default function Home() {
     return track ? splitMidiTrack(track, midiImport.maximumSyllables, midiImport.segmentation, midiImport.polyphonyMode).length : 0;
   }, [midiImport]);
   const selectedMidiTrack = midiImport?.project.tracks.find((track) => track.id === midiImport.trackId);
+  const midiPreviewNotes = useMemo(
+    () => selectedMidiTrack ? midiNotesForMode(selectedMidiTrack, midiImport?.polyphonyMode ?? 'all') : [],
+    [midiImport?.polyphonyMode, selectedMidiTrack],
+  );
+  const midiPreviewBounds = useMemo(() => ({
+    start: midiPreviewNotes[0]?.startSeconds ?? 0,
+    end: midiPreviewNotes.length ? Math.max(...midiPreviewNotes.map((note) => note.endSeconds)) : 0,
+  }), [midiPreviewNotes]);
   const canMergeNextSvpLine = Boolean(
     activeLine?.svp
     && lines[activeIndex + 1]?.svp
@@ -438,6 +456,37 @@ export default function Home() {
   }, [audioUrl]);
 
   useEffect(() => {
+    let cancelled = false;
+    midiPreviewPlayingRef.current = false;
+    if (midiPreviewFrameRef.current !== null) window.cancelAnimationFrame(midiPreviewFrameRef.current);
+    midiPreviewFrameRef.current = null;
+    midiPreviewVoicesRef.current.forEach((oscillator) => {
+      try { oscillator.stop(); } catch { /* The voice may already have ended. */ }
+      oscillator.disconnect();
+    });
+    midiPreviewVoicesRef.current.clear();
+    midiPreviewOffsetRef.current = midiPreviewBounds.start;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setMidiPreviewTime(midiPreviewBounds.start);
+      setMidiPreviewPlaying(false);
+    });
+    return () => { cancelled = true; };
+  }, [midiPreviewBounds.start, midiPreviewNotes]);
+
+  useEffect(() => () => {
+    midiPreviewPlayingRef.current = false;
+    if (midiPreviewFrameRef.current !== null) window.cancelAnimationFrame(midiPreviewFrameRef.current);
+    midiPreviewVoicesRef.current.forEach((oscillator) => {
+      try { oscillator.stop(); } catch { /* The voice may already have ended. */ }
+      oscillator.disconnect();
+    });
+    midiPreviewVoicesRef.current.clear();
+    const context = midiAudioContextRef.current;
+    if (context && context.state !== 'closed') void context.close();
+  }, []);
+
+  useEffect(() => {
     if (!followLyrics || !playing) return;
     lineButtonRefs.current.get(activeId)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     editorPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -450,6 +499,117 @@ export default function Home() {
   const flash = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice(''), 1800);
+  };
+
+  const silenceMidiPreview = () => {
+    midiPreviewPlayingRef.current = false;
+    if (midiPreviewFrameRef.current !== null) window.cancelAnimationFrame(midiPreviewFrameRef.current);
+    midiPreviewFrameRef.current = null;
+    midiPreviewVoicesRef.current.forEach((oscillator) => {
+      try { oscillator.stop(); } catch { /* The voice may already have ended. */ }
+      oscillator.disconnect();
+    });
+    midiPreviewVoicesRef.current.clear();
+    setMidiPreviewPlaying(false);
+  };
+
+  const currentMidiPreviewTime = () => {
+    const context = midiAudioContextRef.current;
+    if (!context || !midiPreviewPlayingRef.current) return midiPreviewOffsetRef.current;
+    return Math.min(midiPreviewBounds.end, midiPreviewOffsetRef.current + context.currentTime - midiPreviewStartedAtRef.current);
+  };
+
+  const pauseMidiPreview = (reset = false) => {
+    const nextTime = reset ? midiPreviewBounds.start : currentMidiPreviewTime();
+    silenceMidiPreview();
+    midiPreviewOffsetRef.current = nextTime;
+    setMidiPreviewTime(nextTime);
+  };
+
+  const scheduleMidiPreviewNote = (context: AudioContext, note: (typeof midiPreviewNotes)[number], peak: number) => {
+    const startAt = Math.max(context.currentTime + .004, midiPreviewStartedAtRef.current + note.startSeconds - midiPreviewOffsetRef.current);
+    const endAt = Math.max(startAt + .025, midiPreviewStartedAtRef.current + note.endSeconds - midiPreviewOffsetRef.current);
+    if (endAt <= context.currentTime) return;
+    const attackEnd = Math.min(endAt - .004, startAt + .012);
+    const releaseStart = Math.max(attackEnd, endAt - .035);
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'triangle';
+    oscillator.frequency.setValueAtTime(440 * 2 ** ((note.pitch - 69) / 12), startAt);
+    gain.gain.setValueAtTime(.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(peak, attackEnd);
+    gain.gain.setValueAtTime(peak, releaseStart);
+    gain.gain.exponentialRampToValueAtTime(.0001, endAt);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    midiPreviewVoicesRef.current.add(oscillator);
+    oscillator.onended = () => {
+      midiPreviewVoicesRef.current.delete(oscillator);
+      oscillator.disconnect();
+      gain.disconnect();
+    };
+    oscillator.start(startAt);
+    oscillator.stop(endAt + .01);
+  };
+
+  const runMidiPreviewFrame = (context: AudioContext, notes: typeof midiPreviewNotes, peak: number) => {
+    if (!midiPreviewPlayingRef.current) return;
+    const position = Math.min(midiPreviewBounds.end, midiPreviewOffsetRef.current + context.currentTime - midiPreviewStartedAtRef.current);
+    setMidiPreviewTime(position);
+    while (midiPreviewCursorRef.current < notes.length && notes[midiPreviewCursorRef.current].startSeconds <= position + .35) {
+      const note = notes[midiPreviewCursorRef.current++];
+      if (note.endSeconds > position) scheduleMidiPreviewNote(context, note, peak);
+    }
+    if (position >= midiPreviewBounds.end - .005) {
+      midiPreviewOffsetRef.current = midiPreviewBounds.end;
+      silenceMidiPreview();
+      setMidiPreviewTime(midiPreviewBounds.end);
+      return;
+    }
+    midiPreviewFrameRef.current = window.requestAnimationFrame(() => runMidiPreviewFrame(context, notes, peak));
+  };
+
+  const toggleMidiPreview = async () => {
+    if (midiPreviewPlayingRef.current) {
+      pauseMidiPreview();
+      return;
+    }
+    if (!midiPreviewNotes.length || midiPreviewBounds.end <= midiPreviewBounds.start) {
+      flash('这条轨道没有可以试听的音符');
+      return;
+    }
+    try {
+      let context = midiAudioContextRef.current;
+      if (!context || context.state === 'closed') {
+        context = new AudioContext();
+        midiAudioContextRef.current = context;
+      }
+      await context.resume();
+      silenceMidiPreview();
+      const offset = midiPreviewOffsetRef.current >= midiPreviewBounds.end - .005
+        ? midiPreviewBounds.start
+        : Math.max(midiPreviewBounds.start, midiPreviewOffsetRef.current);
+      midiPreviewOffsetRef.current = offset;
+      setMidiPreviewTime(offset);
+      midiPreviewStartedAtRef.current = context.currentTime;
+      const firstNote = midiPreviewNotes.findIndex((note) => note.endSeconds > offset);
+      midiPreviewCursorRef.current = firstNote < 0 ? midiPreviewNotes.length : firstNote;
+      midiPreviewPlayingRef.current = true;
+      setMidiPreviewPlaying(true);
+      const peak = midiImport?.polyphonyMode === 'all' && selectedMidiTrack && selectedMidiTrack.maxPolyphony > 1 ? .032 : .075;
+      runMidiPreviewFrame(context, midiPreviewNotes, peak);
+    } catch (error) {
+      console.error(error);
+      silenceMidiPreview();
+      flash('浏览器没能启动 MIDI 试听，请检查是否允许网页播放声音');
+    }
+  };
+
+  const seekMidiPreview = (value: number) => {
+    pauseMidiPreview();
+    const nextTime = Math.min(midiPreviewBounds.end, Math.max(midiPreviewBounds.start, value));
+    midiPreviewOffsetRef.current = nextTime;
+    setMidiPreviewTime(nextTime);
   };
 
   const openTutorial = () => {
@@ -1615,6 +1775,27 @@ export default function Home() {
             <h2 id="midi-import-title">选择旋律或歌唱轨道</h2>
             <p>{midiImport.fileName} · SMF {midiImport.project.format} · {midiImport.project.tempos.length} 个速度节点 · 原文件只读</p>
 
+            <div className={`midi-preview-player ${midiPreviewPlaying ? 'playing' : ''}`}>
+              <div className="midi-preview-heading">
+                <span><b>试听所选轨道</b><small>用合成音确认旋律、速度和轨道是否选对</small></span>
+                <output>{formatTime(midiPreviewTime)} / {formatTime(midiPreviewBounds.end)}</output>
+              </div>
+              <div className="midi-preview-controls">
+                <button className="midi-preview-toggle" onClick={toggleMidiPreview} aria-label={midiPreviewPlaying ? '暂停 MIDI 试听' : '播放 MIDI 试听'}>{midiPreviewPlaying ? 'Ⅱ' : '▶'}</button>
+                <button className="midi-preview-stop" onClick={() => pauseMidiPreview(true)} aria-label="停止并回到轨道开头">■</button>
+                <input
+                  type="range"
+                  min={midiPreviewBounds.start}
+                  max={Math.max(midiPreviewBounds.end, midiPreviewBounds.start + .01)}
+                  step="0.01"
+                  value={Math.min(midiPreviewTime, Math.max(midiPreviewBounds.end, midiPreviewBounds.start + .01))}
+                  onChange={(event) => seekMidiPreview(Number(event.target.value))}
+                  aria-label="MIDI 试听进度"
+                />
+                <span className="midi-preview-pulse" aria-hidden="true">{[0, 1, 2, 3, 4].map((index) => <i key={index} />)}</span>
+              </div>
+            </div>
+
             <div className="svp-track-list midi-track-list">
               {midiImport.project.tracks.map((track) => (
                 <button
@@ -1663,7 +1844,7 @@ export default function Home() {
               <div>{([['conservative', '保守'], ['balanced', '标准'], ['strict', '积极']] as Array<[MidiSegmentation, string]>).map(([value, label]) => <button className={midiImport.segmentation === value ? 'selected' : ''} key={value} onClick={() => setMidiImport((current) => current ? { ...current, segmentation: value } : current)}>{label}</button>)}</div>
             </div>
 
-            <div className="svp-import-note midi-import-note">当前预计拆成 <b>{estimatedMidiPhrases}</b> 句。导入后保留音符时间轴，可以继续手动断句和合并；MIDI 不含歌曲音频，试听仍需单独上传。</div>
+            <div className="svp-import-note midi-import-note">当前预计拆成 <b>{estimatedMidiPhrases}</b> 句。导入后保留音符时间轴，可以继续手动断句和合并；上面的试听是合成音色，原曲人声仍需单独上传。</div>
             <div className="modal-actions"><button onClick={() => setMidiImport(null)}>取消</button><button className="analyze-button" disabled={analyzing} onClick={confirmMidiImport}>{analyzing ? '正在对齐歌词与音符…' : '导入所选 MIDI 轨道 →'}</button></div>
           </section>
         </div>

@@ -478,6 +478,27 @@ button { color: inherit; }
 .svp-import-note { margin-top: 11px; color: #84908a; font-size: 10px; line-height: 1.65; }
 .svp-import-note b { color: var(--lime); font-size: 11px; }
 .midi-import-modal { width: min(730px, 100%); }
+.midi-preview-player { margin-bottom: 10px; padding: 11px 12px; border: 1px solid #315e5a; border-radius: 12px; background: radial-gradient(circle at 100% 0, color-mix(in srgb, var(--cyan) 9%, transparent), transparent 42%), #101718; box-shadow: inset 0 1px rgba(255,255,255,.025); }
+.midi-preview-player.playing { border-color: #4b918b; box-shadow: inset 0 1px rgba(255,255,255,.035), 0 0 22px color-mix(in srgb, var(--cyan) 7%, transparent); }
+.midi-preview-heading { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.midi-preview-heading > span { display: grid; gap: 2px; }
+.midi-preview-heading b { color: #d9e7e4; font-size: 11px; }
+.midi-preview-heading small { color: #728783; font-size: 9px; }
+.midi-preview-heading output { flex: 0 0 auto; color: #80c9c3; font: 700 9px ui-monospace, "Cascadia Code", monospace; }
+.midi-preview-controls { display: grid; grid-template-columns: 33px 29px minmax(120px, 1fr) 44px; align-items: center; gap: 7px; margin-top: 9px; }
+.midi-preview-controls button { display: grid; place-items: center; border: 1px solid #365552; background: #192523; color: var(--cyan); cursor: pointer; }
+.midi-preview-toggle { width: 33px; height: 33px; border-radius: 50%; padding-left: 2px; font-size: 11px; }
+.midi-preview-player.playing .midi-preview-toggle { background: var(--cyan); color: #10211f; box-shadow: 0 0 16px color-mix(in srgb, var(--cyan) 24%, transparent); }
+.midi-preview-stop { width: 29px; height: 29px; border-radius: 8px; font-size: 8px; }
+.midi-preview-controls input { min-width: 0; width: 100%; accent-color: var(--cyan); cursor: pointer; }
+.midi-preview-pulse { height: 22px; display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
+.midi-preview-pulse i { width: 3px; height: 7px; border-radius: 2px; background: #42645f; animation: midi-preview-meter .72s ease-in-out infinite alternate; animation-play-state: paused; }
+.midi-preview-pulse i:nth-child(2) { animation-delay: -.46s; }
+.midi-preview-pulse i:nth-child(3) { animation-delay: -.18s; }
+.midi-preview-pulse i:nth-child(4) { animation-delay: -.6s; }
+.midi-preview-pulse i:nth-child(5) { animation-delay: -.28s; }
+.midi-preview-player.playing .midi-preview-pulse i { background: var(--cyan); animation-play-state: running; }
+@keyframes midi-preview-meter { from { height: 5px; opacity: .45; } to { height: 21px; opacity: 1; } }
 .midi-track-list > button { min-height: 67px; }
 .midi-track-list > button.selected { border-color: #39716e; background: linear-gradient(135deg, rgba(117, 222, 215, .12), rgba(117, 222, 215, .025)); }
 .midi-track-list > button > span:first-child { position: relative; padding-right: 70px; }
@@ -567,6 +588,10 @@ button { color: inherit; }
   .theme-presets, .color-controls { grid-template-columns: 1fr 1fr; }
   .background-setting { grid-template-columns: 1fr; }
   .project-import-shortcuts { grid-template-columns: 1fr; }
+  .midi-preview-heading { align-items: flex-start; }
+  .midi-preview-heading small { max-width: 210px; }
+  .midi-preview-controls { grid-template-columns: 33px 29px minmax(90px, 1fr); }
+  .midi-preview-pulse { display: none; }
   .svp-phrase-setting { align-items: stretch; flex-direction: column; }
   .svp-phrase-setting > div { flex-wrap: wrap; }
   .ai-layout { grid-template-columns: 1fr; }
@@ -579,7 +604,7 @@ button { color: inherit; }
   .phoneme-token:hover, .lyric-cell:hover { transform: translateY(-2px); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .hazard-marquee > div, .ai-gate-scan::after, .ai-warning-mark::before, .ai-warning-mark span, .ai-security-code span, .unlock-reticle, .unlock-reticle i { animation: none !important; }
+  .hazard-marquee > div, .ai-gate-scan::after, .ai-warning-mark::before, .ai-warning-mark span, .ai-security-code span, .unlock-reticle, .unlock-reticle i, .midi-preview-pulse i { animation: none !important; }
   .ai-oath-progress i { transition: none; }
   .ai-oath-modal.unlocking, .ai-oath-modal.unlocking .ai-gate-content, .ai-oath-modal.unlocking .ai-unlock-sequence { animation-duration: .01ms; animation-delay: 0s; }
 }

@@ -378,7 +378,7 @@ export function midiTrackScore(track: MidiTrack): number {
   return lyricBonus + nameBonus + melodyBonus + Math.min(track.notes.length, 800) - drumPenalty;
 }
 
-function notesForMode(track: MidiTrack, mode: MidiPolyphonyMode): MidiNote[] {
+export function midiNotesForMode(track: MidiTrack, mode: MidiPolyphonyMode): MidiNote[] {
   if (mode === 'all' || track.maxPolyphony <= 1) return track.notes;
   const grouped = new Map<number, MidiNote[]>();
   track.notes.forEach((note) => {
@@ -398,7 +398,7 @@ function noteAddsSyllable(note: MidiNote): boolean {
 }
 
 export function splitMidiTrack(track: MidiTrack, maximumSyllables = 18, segmentation: MidiSegmentation = 'balanced', polyphonyMode: MidiPolyphonyMode = 'melody'): MidiNote[][] {
-  const notes = notesForMode(track, polyphonyMode);
+  const notes = midiNotesForMode(track, polyphonyMode);
   const phrases: MidiNote[][] = [];
   let current: MidiNote[] = [];
   let syllables = 0;
