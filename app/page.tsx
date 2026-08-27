@@ -51,7 +51,7 @@ import {
   splitVocaloidTrack,
 } from '../lib/vocaloid';
 import { WritableProject } from '../lib/project-export';
-import LabModal, { LabDraftLine } from './lab';
+import LabModal from './lab';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -250,6 +250,7 @@ export default function Home() {
   const [activeId, setActiveId] = useState('sample-3');
   const [projectTitle, setProjectTitle] = useState('未命名翻填工程');
   const [selectedCell, setSelectedCell] = useState(5);
+  const [selectedTokenId, setSelectedTokenId] = useState('');
   const [showKana, setShowKana] = useState(false);
   const [editingPronunciation, setEditingPronunciation] = useState(false);
   const [manualPronunciation, setManualPronunciation] = useState('');
@@ -263,7 +264,7 @@ export default function Home() {
   const [midiImport, setMidiImport] = useState<PendingMidiImport | null>(null);
   const [vocaloidImport, setVocaloidImport] = useState<PendingVocaloidImport | null>(null);
   const [labOpen, setLabOpen] = useState(false);
-  const [writableProject, setWritableProject] = useState<WritableProject | null>(null);
+  const [, setWritableProject] = useState<WritableProject | null>(null);
   const [midiPreviewPlaying, setMidiPreviewPlaying] = useState(false);
   const [midiPreviewTime, setMidiPreviewTime] = useState(0);
   const [selectedSvpNoteId, setSelectedSvpNoteId] = useState('');
@@ -323,6 +324,8 @@ export default function Home() {
   const activeIndex = lines.findIndex((line) => line.id === activeId);
   const activeLine = lines[activeIndex] ?? lines[0];
   const suggestedCount = activeLine ? baseCount(activeLine.tokens) : 0;
+  const selectedTokenIndex = activeLine?.tokens.findIndex((item) => item.id === selectedTokenId) ?? -1;
+  const selectedToken = selectedTokenIndex >= 0 ? activeLine.tokens[selectedTokenIndex] : undefined;
   const currentCount = activeLine
     ? activeLine.target.filter((cell) => cell.trim() && cell !== '—').length
     : 0;
@@ -648,6 +651,7 @@ export default function Home() {
     setFollowLyrics(snapshot.followLyrics);
     setSelectedSvpNoteId('');
     setSelectedMidiNoteId('');
+    setSelectedTokenId('');
     setEditingPronunciation(false);
     setUndoDepth(undoStackRef.current.length);
     flash(`已撤销：${snapshot.label}`);
@@ -804,41 +808,82 @@ export default function Home() {
   const savePronunciation = () => {
     const tokens = manualPronunciationToTokens(manualPronunciation);
     updateActiveLine((line) => ({ ...line, tokens, uncertain: false }), '修改实际唱法');
+    setSelectedTokenId('');
     setEditingPronunciation(false);
     flash('实际唱法已更新');
   };
 
-  const toggleToken = (id: string) => {
-    updateActiveLine((line) => {
-      const index = line.tokens.findIndex((item) => item.id === id);
-      const item = line.tokens[index];
-      if (!item) return line;
+  const tokenParts = (item: PronunciationToken): PronunciationToken[] => (
+    item.kind === 'linked' && item.components?.length
+      ? item.components.flatMap(tokenParts)
+      : [{ ...item }]
+  );
 
-      if (item.linkCandidate && index > 0) {
-        const previous = line.tokens[index - 1];
-        const currentPart = { ...item };
-        delete currentPart.linkCandidate;
-        const linked: PronunciationToken = {
-          id: `${previous.id}-linked-${item.id}`,
-          label: `${previous.label}+${item.label}`,
-          kana: `${previous.kana ?? ''}${item.kana ?? ''}` || undefined,
-          kind: 'linked',
-          counted: true,
-          source: 'ja',
-          components: [previous, currentPart],
-        };
-        return { ...line, tokens: [...line.tokens.slice(0, index - 1), linked, ...line.tokens.slice(index + 1)] };
-      }
+  const linkTokens = (leftId: string, rightId: string) => {
+    if (!activeLine) return;
+    const leftIndex = activeLine.tokens.findIndex((item) => item.id === leftId);
+    const rightIndex = activeLine.tokens.findIndex((item) => item.id === rightId);
+    if (leftIndex < 0 || rightIndex !== leftIndex + 1) {
+      flash('只能连接相邻的两个发音');
+      return;
+    }
+    const left = activeLine.tokens[leftIndex];
+    const right = activeLine.tokens[rightIndex];
+    if (!left.counted && !right.counted) {
+      flash('这两个音都已吸收，不需要再连成一格');
+      return;
+    }
+    const linkedId = nextLineId('linked-token');
+    const linked: PronunciationToken = {
+      id: linkedId,
+      label: `${left.label}+${right.label}`,
+      kana: `${left.kana ?? ''}${right.kana ?? ''}` || undefined,
+      kind: 'linked',
+      counted: true,
+      source: left.source === right.source ? left.source : 'manual',
+      components: [...tokenParts(left), ...tokenParts(right)],
+    };
+    updateActiveLine((line) => ({
+      ...line,
+      tokens: line.tokens.flatMap((item, index) => index === leftIndex ? [linked] : index === rightIndex ? [] : [item]),
+    }), '合并发音格');
+    setSelectedTokenId(linkedId);
+    flash(`已把 ${left.label} + ${right.label} 连成一个中文格`);
+  };
 
-      return {
-        ...line,
-        tokens: line.tokens.flatMap((tokenItem) => {
-          if (tokenItem.id !== id) return [tokenItem];
-          if (tokenItem.kind === 'linked' && tokenItem.components?.length) return tokenItem.components;
-          return [{ ...tokenItem, counted: !tokenItem.counted, kind: tokenItem.counted ? 'absorbed' : 'normal' }];
-        }),
-      };
-    }, '调整发音格');
+  const splitSelectedToken = () => {
+    if (!selectedToken?.components?.length) return;
+    const parts = tokenParts(selectedToken);
+    updateActiveLine((line) => ({
+      ...line,
+      tokens: line.tokens.flatMap((item) => item.id === selectedToken.id ? parts : [item]),
+    }), '拆开发音格');
+    setSelectedTokenId(parts[0]?.id ?? '');
+    flash(`已拆回 ${parts.length} 个发音`);
+  };
+
+  const toggleSelectedTokenAbsorption = () => {
+    if (!selectedToken) return;
+    if (selectedToken.kind === 'linked') {
+      flash('连读格请先拆开，再单独设置吸收');
+      return;
+    }
+    const willAbsorb = selectedToken.counted;
+    updateActiveLine((line) => ({
+      ...line,
+      tokens: line.tokens.map((item) => {
+        if (item.id !== selectedToken.id) return item;
+        if (willAbsorb) {
+          const restoredKind: PronunciationToken['restoredKind'] = item.kind === 'normal' || item.kind === 'long' || item.kind === 'uncertain'
+            ? item.kind
+            : item.restoredKind;
+          return { ...item, counted: false, restoredKind, kind: 'absorbed' };
+        }
+        const restoredKind = item.restoredKind ?? (/[āīūēōː:]$/i.test(item.label) ? 'long' : 'normal');
+        return { ...item, counted: true, kind: restoredKind };
+      }),
+    }), willAbsorb ? '吸收发音' : '恢复发音计字');
+    flash(willAbsorb ? `已吸收 ${selectedToken.label}，基础建议少一字` : `${selectedToken.label} 已恢复计字`);
   };
 
   const updateCell = (index: number, value: string, undoLabel = '填写中文词格') => {
@@ -1479,13 +1524,18 @@ export default function Home() {
     flash('项目文件已导出');
   };
 
-  const restoreLabDraft = (draftLines: LabDraftLine[]) => {
-    rememberUndo('恢复实验室版本');
-    setLines((current) => current.map((line, index) => {
-      const draft = draftLines.find((candidate) => candidate.id === line.id) ?? draftLines[index];
-      return draft ? { ...line, target: [...draft.target], tokens: draft.tokens.map((item) => ({ ...item })) } : line;
-    }));
-    flash('已恢复这个版本的歌词与唱法');
+  const applyLabPronunciation = (lineId: string, value: string) => {
+    const tokens = manualPronunciationToTokens(value);
+    if (!tokens.length) {
+      flash('盲听格还是空的，先保留几个发音再应用');
+      return;
+    }
+    rememberUndo('应用盲听实际唱法');
+    setLines((current) => current.map((line) => line.id === lineId ? { ...line, tokens, uncertain: false } : line));
+    setActiveId(lineId);
+    setSelectedCell(0);
+    setSelectedTokenId('');
+    flash('已把盲听修改应用为本句实际唱法');
   };
 
   const seekFromLab = (time: number) => {
@@ -1689,7 +1739,7 @@ export default function Home() {
 
           <section className={`editor-section pronunciation-section ${followLyrics && playing ? 'lrc-entering' : ''}`} key={`pronunciation-${activeLine.id}`}>
             <div className="section-title-row">
-              <div><span className="step-number">01</span><h2>实际唱法</h2><p>连读自动合格；“可连”位置可点一下确认</p></div>
+              <div><span className="step-number">01</span><h2>实际唱法</h2><p>点发音只会选中；吸收和连读分别操作，不会误改</p></div>
               <div className="section-actions">
                 {activeLine.kana && <button className="text-button" onClick={() => setShowKana((value) => !value)}>{showKana ? '收起假名' : '显示假名'}</button>}
                 <button className="text-button" onClick={startPronunciationEdit}>编辑唱法</button>
@@ -1705,16 +1755,61 @@ export default function Home() {
               </div>
             ) : (
               <div className="token-track" aria-label="分格罗马音">
-                {activeLine.tokens.map((item) => (
-                  <button className={`phoneme-token ${item.kind} ${item.linkCandidate ? 'link-candidate' : ''} ${!item.counted ? 'not-counted' : ''}`} key={item.id} onClick={() => toggleToken(item.id)} title={item.kind === 'linked' ? '两个音连读为一个中文格；点击拆回两格' : item.linkCandidate ? '这里可能发生元音连读；点击与前一音合成一格' : item.counted ? '计入基础字数；点击改为可吸收' : '不计入基础字数；点击改为普通发音'}>
-                    <span>{item.label}</span>
-                    {!item.counted && <small>吸收</small>}
-                    {item.kind === 'long' && item.counted && <small>长音</small>}
-                    {item.kind === 'linked' && <small>连读</small>}
-                    {item.linkCandidate && <small>可连</small>}
-                    {item.kind === 'uncertain' && <small>待确认</small>}
-                  </button>
-                ))}
+                {activeLine.tokens.map((item, index) => {
+                  const previous = activeLine.tokens[index - 1];
+                  const recommendedLink = Boolean(item.linkCandidate);
+                  return (
+                    <div className="token-unit" key={item.id}>
+                      {previous && (
+                        <button
+                          type="button"
+                          className={`token-link-button ${recommendedLink ? 'recommended' : ''}`}
+                          onClick={() => linkTokens(previous.id, item.id)}
+                          aria-label={`把 ${previous.label} 和 ${item.label} 连成一个中文格`}
+                          title={recommendedLink ? '这里可能发生连读；点击后两个发音合占一个中文格' : '让左右两个发音合占一个中文格'}
+                        >
+                          <span>⌁</span><small>{recommendedLink ? '建议连' : '连'}</small>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className={`phoneme-token ${item.kind} ${item.linkCandidate ? 'link-candidate' : ''} ${!item.counted ? 'not-counted' : ''} ${selectedTokenId === item.id ? 'selected' : ''}`}
+                        onClick={() => setSelectedTokenId((current) => current === item.id ? '' : item.id)}
+                        aria-pressed={selectedTokenId === item.id}
+                        title={item.kind === 'linked' ? '这是一个连读格；点选后可以拆开' : item.counted ? '点选后可以设为吸收' : '点选后可以恢复计字'}
+                      >
+                        <span>{item.label}</span>
+                        {!item.counted && <small>已吸收</small>}
+                        {item.kind === 'long' && item.counted && <small>长音</small>}
+                        {item.kind === 'linked' && <small>连读一格</small>}
+                        {item.linkCandidate && item.kind !== 'linked' && <small>可连</small>}
+                        {item.kind === 'uncertain' && <small>待确认</small>}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {selectedToken && !editingPronunciation && (
+              <div className="token-action-bar" aria-live="polite">
+                <div className="token-selection-copy">
+                  <span>已选第 {selectedTokenIndex + 1} 个发音</span>
+                  <strong>{selectedToken.label}</strong>
+                  <small>{selectedToken.kind === 'linked' ? '当前由多个发音合占一个中文格' : selectedToken.counted ? '当前计入一个中文字' : '当前不占中文字'}</small>
+                </div>
+                <div className="token-selection-actions">
+                  {selectedToken.kind === 'linked' ? (
+                    <button className="primary" onClick={splitSelectedToken}>拆开连读</button>
+                  ) : (
+                    <>
+                      <button className={selectedToken.counted ? 'danger' : 'primary'} onClick={toggleSelectedTokenAbsorption}>{selectedToken.counted ? '吸收此音' : '恢复计字'}</button>
+                      <button disabled={selectedTokenIndex <= 0} onClick={() => linkTokens(activeLine.tokens[selectedTokenIndex - 1]?.id ?? '', selectedToken.id)}>与前音连成一格</button>
+                      <button disabled={selectedTokenIndex >= activeLine.tokens.length - 1} onClick={() => linkTokens(selectedToken.id, activeLine.tokens[selectedTokenIndex + 1]?.id ?? '')}>与后音连成一格</button>
+                    </>
+                  )}
+                  <button className="quiet" onClick={() => setSelectedTokenId('')}>取消选择</button>
+                </div>
               </div>
             )}
 
@@ -1825,7 +1920,7 @@ export default function Home() {
               </div>
             )}
 
-            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.vocaloid ? `${activeLine.vocaloid.format} 已保留原音符与歌词；读法仍以听感为准，可点“编辑唱法”修正。` : activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}；“+”表示两个音连读占一个中文格，点击可拆开。`}</div>
+            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.vocaloid ? `${activeLine.vocaloid.format} 已保留原音符与歌词；读法仍以听感为准，可点“编辑唱法”修正。` : activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}。“吸收”是不占中文字；点两格中间的“连”，才会让两个音合占一格。`}</div>
           </section>
 
           <section className={`editor-section target-section ${followLyrics && playing ? 'lrc-entering lrc-entering-late' : ''}`} key={`target-${activeLine.id}`}>
@@ -1888,7 +1983,7 @@ export default function Home() {
             <div className="marker-actions"><button onClick={() => setMarker('start')}>设为句首</button><button onClick={() => setMarker('end')}>设为句尾</button></div>
             <div className="marker-time"><span>A {formatTime(activeLine.start ?? 0)}</span><span>B {activeLine.end != null ? formatTime(activeLine.end) : '未设置'}</span></div>
           </div>
-          <div className="legend-card"><h3>格子说明</h3><p><span className="legend-dot normal" />普通发音 <small>建议填一字</small></p><p><span className="legend-dot candidate" />连读候选 <small>点一下与前音合并</small></p><p><span className="legend-dot linked" />连读 <small>两个音合占一字，可拆</small></p><p><span className="legend-dot long" />长音 <small>默认一字，可拆</small></p><p><span className="legend-dot absorbed" />可吸收 <small>默认不添字</small></p></div>
+          <div className="legend-card"><h3>格子说明</h3><p><span className="legend-dot normal" />普通发音 <small>点选后再决定</small></p><p><span className="legend-dot candidate" />连读候选 <small>点两格之间的“连”</small></p><p><span className="legend-dot linked" />连读 <small>两个音合占一字，可拆</small></p><p><span className="legend-dot long" />长音 <small>默认一字，可拆</small></p><p><span className="legend-dot absorbed" />已吸收 <small>不占中文字，可恢复</small></p></div>
           <div className="tip-card"><span>提示</span><p>基础建议不是硬性答案。只要唱起来顺，你可以把延音移动到任何位置。</p></div>
           <div className="creator-credit"><span>策划与制作</span><strong>北艾sama</strong></div>
         </aside>
@@ -2314,17 +2409,17 @@ export default function Home() {
         <LabModal
           lines={lines}
           activeId={activeId}
-          projectTitle={projectTitle}
           currentTime={currentTime}
           duration={duration}
           playing={playing}
           rate={rate}
-          looping={looping}
           audioAvailable={Boolean(audioUrl)}
-          writableProject={writableProject}
+          subtitleAvailable={Boolean(subtitleName.toLowerCase().endsWith('.lrc'))}
+          audioName={audioName}
+          subtitleName={subtitleName}
           onClose={() => setLabOpen(false)}
           onSelectLine={(id) => { setActiveId(id); setSelectedCell(0); }}
-          onRestoreDraft={restoreLabDraft}
+          onApplyPronunciation={applyLabPronunciation}
           onTogglePlay={togglePlay}
           onSeek={seekFromLab}
           onRate={setRateFromLab}
@@ -2348,7 +2443,7 @@ export default function Home() {
 
             <ol className="tutorial-steps">
               <li><span>1</span><p><strong>导入你的材料</strong><small>可以粘贴歌词，也可以导入 SVP、VSQX、VPR、MIDI、SRT 或 LRC。音符句子黏住时，点音符即可手动断句。</small></p></li>
-              <li><span>2</span><p><strong>先看上面的发音格</strong><small>普通格填一字；灰色“吸收”不用填；“可连”听着连起来就点它。</small></p></li>
+              <li><span>2</span><p><strong>先看上面的发音格</strong><small>点一个音只是选中；要吸收就在下方确认，要连读就点两个音中间的“连”。</small></p></li>
               <li><span>3</span><p><strong>再填下面的中文格</strong><small>可以整句粘贴。格子下方会显示拼音，句尾会告诉你是什么韵。</small></p></li>
               <li><span>4</span><p><strong>最后跟着歌听一遍</strong><small>上传歌曲和 SRT/LRC，打开“跟随歌词”，词格会自己翻到当前句。</small></p></li>
               <li><span>5</span><p><strong>从全局看看整首歌</strong><small>“全局预览”检查整首押韵；“AI 参谋”只帮你查意思和找灵感，不会替你填格子。</small></p></li>

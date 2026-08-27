@@ -1,12 +1,11 @@
 'use client';
 
-import { CSSProperties, useMemo, useState } from 'react';
+import { CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PronunciationToken, baseCount } from '../lib/phonetics';
 import { analyzeChineseCells } from '../lib/chinese';
 import { MidiLineMeta } from '../lib/midi';
 import { SvpLineMeta } from '../lib/svp';
 import { VocaloidLineMeta } from '../lib/vocaloid';
-import { WritableProject, exportSvpWithChinese, exportVocaloidWithChinese } from '../lib/project-export';
 
 export type LabLine = {
   id: string;
@@ -23,9 +22,9 @@ export type LabLine = {
   vocaloid?: VocaloidLineMeta;
 };
 
-export type LabDraftLine = Pick<LabLine, 'id' | 'source' | 'target' | 'tokens'>;
-
-type LabTab = 'health' | 'match' | 'roll' | 'rhyme' | 'versions' | 'export' | 'check' | 'blind';
+type LabTab = 'match' | 'rhyme' | 'check' | 'blind';
+type BlindPhase = 'ready' | 'recording' | 'review';
+type BlindTap = { id: string; time: number; label: string };
 type NoteLike = {
   id: string;
   lyric: string;
@@ -37,27 +36,20 @@ type NoteLike = {
   role: 'normal' | 'hold' | 'syllable' | 'breath';
 };
 
-type Snapshot = {
-  id: string;
-  name: string;
-  createdAt: number;
-  lines: LabDraftLine[];
-};
-
 type Props = {
   lines: LabLine[];
   activeId: string;
-  projectTitle: string;
   currentTime: number;
   duration: number;
   playing: boolean;
   rate: number;
-  looping: boolean;
   audioAvailable: boolean;
-  writableProject: WritableProject | null;
+  subtitleAvailable: boolean;
+  audioName: string;
+  subtitleName: string;
   onClose: () => void;
   onSelectLine: (id: string) => void;
-  onRestoreDraft: (lines: LabDraftLine[]) => void;
+  onApplyPronunciation: (lineId: string, value: string) => void;
   onTogglePlay: () => void;
   onSeek: (time: number) => void;
   onRate: (rate: number) => void;
@@ -66,17 +58,18 @@ type Props = {
 };
 
 const tabLabels: Array<[LabTab, string, string]> = [
-  ['health', '填词体检', '咬字与时值'],
+  ['blind', '盲听打点', '空格键记录 la'],
   ['match', '声韵对照', '原音与拼音'],
-  ['roll', '全曲钢琴窗', '音高与时间'],
   ['rhyme', '押韵地图', '整首韵脚'],
-  ['versions', '版本对比', '保存与恢复'],
-  ['export', '工程写回', '另存歌声工程'],
   ['check', '导出自检', '查漏补缺'],
-  ['blind', '盲听模式', '只凭耳朵填'],
 ];
 
-const snapshotKey = 'lyric-grid-lab-snapshots-v1';
+const lockedShops = [
+  ['填词体检', '咬字与时值'],
+  ['全曲钢琴窗', '音高与时间'],
+  ['版本对比', '保存与恢复'],
+  ['工程回写', '歌声工程副本'],
+];
 
 function lineNotes(line: LabLine): NoteLike[] {
   if (line.vocaloid) return line.vocaloid.notes;
@@ -129,93 +122,37 @@ function soundScore(original: string, final: string): number {
   return near.has(`${left}-${right}`) ? 72 : 38;
 }
 
-function healthIssues(line: LabLine): Array<{ level: 'danger' | 'warn' | 'tip'; text: string }> {
-  const issues: Array<{ level: 'danger' | 'warn' | 'tip'; text: string }> = [];
-  const expected = baseCount(line.tokens);
-  const filled = line.target.filter((cell) => cell.trim() && cell !== '—').length;
-  if (!filled) issues.push({ level: 'danger', text: '这一句还没有中文填词。' });
-  else if (filled < expected) issues.push({ level: 'warn', text: `还少 ${expected - filled} 个实际发音字。` });
-  else if (filled > expected) issues.push({ level: 'danger', text: `比建议词格多 ${filled - expected} 个字，可能发生抢拍。` });
-
-  const pairs = noteCellPairs(line);
-  const pitches = pairs.map((pair) => pair.note?.pitch).filter((value): value is number => value != null);
-  const high = pitches.length ? Math.max(...pitches) - 2 : 128;
-  const reading = analyzeChineseCells(line.target);
-  pairs.forEach((pair) => {
-    const final = reading.cells[pair.index]?.final ?? '';
-    if (!pair.note || !pair.cell || pair.cell === '—') return;
-    if (pair.note.durationSeconds < .13 && /(?:ang|eng|ing|ong|ian|uan)$/i.test(final)) issues.push({ level: 'warn', text: `“${pair.cell}”只有 ${Math.round(pair.note.durationSeconds * 1000)}ms，后鼻音可能咬不完整。` });
-    if (pair.note.pitch >= high && /(?:n|ng|i|u)$/i.test(final)) issues.push({ level: 'tip', text: `高音上的“${pair.cell}”收口较紧，可以实唱确认开口度。` });
-    if (pair.note.durationSeconds >= .85 && pair.cell.length && /(?:i|u|v)$/i.test(final)) issues.push({ level: 'tip', text: `“${pair.cell}”需要拖 ${pair.note.durationSeconds.toFixed(2)} 秒，闭口韵母可能不够舒展。` });
+function lineAtTime(lines: LabLine[], time: number): LabLine | undefined {
+  return lines.find((line, index) => {
+    if (line.start == null) return false;
+    const nextStart = lines.slice(index + 1).find((candidate) => candidate.start != null)?.start;
+    const end = line.end ?? nextStart ?? Number.POSITIVE_INFINITY;
+    return time >= line.start && time < end;
   });
-  if (line.uncertain) issues.push({ level: 'warn', text: '这一句的原唱读法仍是自动推测，建议先盲听确认。' });
-  return issues.slice(0, 6);
-}
-
-function downloadBlob(fileName: string, blob: Blob) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function snapshotDraft(lines: LabLine[]): LabDraftLine[] {
-  return lines.map((line) => ({ id: line.id, source: line.source, target: [...line.target], tokens: line.tokens.map((token) => ({ ...token })) }));
-}
-
-function loadSnapshots(): Snapshot[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const value = JSON.parse(window.localStorage.getItem(snapshotKey) ?? '[]') as Snapshot[];
-    return Array.isArray(value) ? value : [];
-  } catch {
-    return [];
-  }
 }
 
 export default function LabModal(props: Props) {
-  const [tab, setTab] = useState<LabTab>('health');
-  const [snapshots, setSnapshots] = useState<Snapshot[]>(() => loadSnapshots());
-  const [baselineId, setBaselineId] = useState(() => loadSnapshots()[0]?.id ?? '');
-  const [snapshotName, setSnapshotName] = useState('');
-  const [blindReveal, setBlindReveal] = useState(false);
-  const [exporting, setExporting] = useState(false);
+  const [tab, setTab] = useState<LabTab>('blind');
+  const [blindPhase, setBlindPhase] = useState<BlindPhase>('ready');
+  const [blindTaps, setBlindTaps] = useState<Record<string, BlindTap[]>>({});
+  const tapCounterRef = useRef(0);
+  const { currentTime, lines, onNotice, playing } = props;
   const activeIndex = Math.max(0, props.lines.findIndex((line) => line.id === props.activeId));
   const activeLine = props.lines[activeIndex] ?? props.lines[0];
-  const allIssues = useMemo(() => props.lines.map((line) => ({ line, issues: healthIssues(line) })), [props.lines]);
-  const seriousCount = allIssues.reduce((sum, row) => sum + row.issues.filter((issue) => issue.level !== 'tip').length, 0);
+  const timedLines = useMemo(() => props.lines.filter((line) => line.start != null), [props.lines]);
+  const blindReady = props.audioAvailable && props.subtitleAvailable && timedLines.length > 0;
+  const playingLine = blindPhase === 'recording' ? lineAtTime(props.lines, props.currentTime) : undefined;
+  const blindLine = playingLine ?? activeLine;
+  const blindLineIndex = Math.max(0, props.lines.findIndex((line) => line.id === blindLine?.id));
+  const activeTaps = blindLine ? blindTaps[blindLine.id] ?? [] : [];
+  const totalTaps = Object.values(blindTaps).reduce((sum, taps) => sum + taps.length, 0);
+
   const rhymeRows = useMemo(() => props.lines.map((line) => ({ line, rhyme: analyzeChineseCells(line.target).rhyme })), [props.lines]);
   const rhymeCounts = useMemo(() => {
     const counts = new Map<string, number>();
     rhymeRows.forEach(({ rhyme }) => { if (rhyme?.final) counts.set(rhyme.final, (counts.get(rhyme.final) ?? 0) + 1); });
     return counts;
   }, [rhymeRows]);
-  const baseline = snapshots.find((snapshot) => snapshot.id === baselineId);
-  const changedLines = useMemo(() => {
-    if (!baseline) return [];
-    return props.lines.flatMap((line, index) => {
-      const before = baseline.lines.find((candidate) => candidate.id === line.id) ?? baseline.lines[index];
-      const beforeText = before?.target.join('') ?? '';
-      const afterText = line.target.join('');
-      return beforeText === afterText ? [] : [{ line, beforeText, afterText }];
-    });
-  }, [baseline, props.lines]);
-  const rollNotes = useMemo(() => {
-    const seen = new Set<string>();
-    return props.lines.flatMap((line) => lineNotes(line).flatMap((note) => {
-      const key = `${line.vocaloid?.format ?? (line.svp ? 'svp' : 'midi')}-${note.id}`;
-      if (seen.has(key)) return [];
-      seen.add(key);
-      return [{ ...note, lineId: line.id, cell: noteCellPairs(line).find((pair) => pair.note?.id === note.id)?.cell ?? '' }];
-    }));
-  }, [props.lines]);
-  const rollBounds = useMemo(() => {
-    const end = Math.max(props.duration, ...rollNotes.map((note) => note.endSeconds), 1);
-    const pitches = rollNotes.map((note) => note.pitch);
-    return { end, minimum: pitches.length ? Math.min(...pitches) : 48, maximum: pitches.length ? Math.max(...pitches) : 72 };
-  }, [props.duration, rollNotes]);
   const checklist = useMemo(() => {
     const unfinished = props.lines.filter((line) => !line.target.some((cell) => cell.trim() && cell !== '—')).length;
     const mismatch = props.lines.filter((line) => line.target.filter((cell) => cell.trim() && cell !== '—').length !== baseCount(line.tokens)).length;
@@ -226,134 +163,130 @@ export default function LabModal(props: Props) {
       { label: '未完成句子', value: unfinished, good: unfinished === 0, detail: '至少填入一个中文字才算开始' },
       { label: '字数不一致', value: mismatch, good: mismatch === 0, detail: '延音不计入实际发音字数' },
       { label: '唱法待确认', value: uncertain, good: uncertain === 0, detail: '自动推测需要人工听感确认' },
-      { label: '缺少时间轴', value: untimed, good: untimed === 0, detail: '无法跟随播放或进入钢琴窗' },
+      { label: '缺少时间轴', value: untimed, good: untimed === 0, detail: '无法使用 LRC 跟随与盲听打点' },
       { label: '韵脚未识别', value: noRhyme, good: noRhyme === 0, detail: '检查句尾是否为汉字' },
     ];
   }, [props.lines]);
 
-  const saveSnapshot = () => {
-    const next: Snapshot = { id: `version-${Date.now()}`, name: snapshotName.trim() || `版本 ${snapshots.length + 1}`, createdAt: Date.now(), lines: snapshotDraft(props.lines) };
-    const values = [next, ...snapshots].slice(0, 12);
-    try {
-      window.localStorage.setItem(snapshotKey, JSON.stringify(values));
-      setSnapshots(values);
-      setBaselineId(next.id);
-      setSnapshotName('');
-      props.onNotice(`已保存“${next.name}”`);
-    } catch {
-      props.onNotice('版本内容太大，本机存储空间不足');
+  const addBlindTap = useCallback(() => {
+    if (!blindReady) return;
+    if (!playing) {
+      onNotice('先点击播放，再跟着人声按空格');
+      return;
     }
-  };
+    const line = lineAtTime(lines, currentTime);
+    if (!line) {
+      onNotice('当前时间还没有进入 LRC 歌词行');
+      return;
+    }
+    tapCounterRef.current += 1;
+    const marker: BlindTap = { id: `tap-${tapCounterRef.current}`, time: currentTime, label: 'la' };
+    setBlindTaps((current) => {
+      const previous = current[line.id] ?? [];
+      if (previous.length && marker.time - previous[previous.length - 1].time < .07) return current;
+      return { ...current, [line.id]: [...previous, marker] };
+    });
+  }, [blindReady, currentTime, lines, onNotice, playing]);
 
-  const removeSnapshot = (id: string) => {
-    const values = snapshots.filter((snapshot) => snapshot.id !== id);
-    setSnapshots(values);
-    if (baselineId === id) setBaselineId(values[0]?.id ?? '');
-    window.localStorage.setItem(snapshotKey, JSON.stringify(values));
-  };
+  const removeLastBlindTap = useCallback(() => {
+    const line = lineAtTime(props.lines, props.currentTime) ?? blindLine;
+    if (!line) return;
+    setBlindTaps((current) => {
+      const values = current[line.id] ?? [];
+      if (!values.length) return current;
+      return { ...current, [line.id]: values.slice(0, -1) };
+    });
+  }, [blindLine, props.currentTime, props.lines]);
 
-  const exportSingingProject = async () => {
-    if (!props.writableProject) return;
-    setExporting(true);
-    try {
-      if (props.writableProject.kind === 'svp') {
-        const content = exportSvpWithChinese(props.writableProject.sourceText, props.lines);
-        downloadBlob(props.writableProject.fileName.replace(/\.svp$/i, '.中文副本.svp'), new Blob([content], { type: 'application/json' }));
-      } else {
-        const blob = await exportVocaloidWithChinese(props.writableProject, props.lines);
-        downloadBlob(props.writableProject.fileName.replace(/\.(vsqx|vpr)$/i, '.中文副本.$1'), blob);
+  useEffect(() => {
+    if (tab !== 'blind' || blindPhase !== 'recording' || !blindReady) return;
+    const handleBlindKey = (event: globalThis.KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLButtonElement) return;
+      if (event.code === 'Space') {
+        event.preventDefault();
+        if (!event.repeat) addBlindTap();
       }
-      props.onNotice('已生成中文歌词工程副本，原文件没有改动');
-    } catch (error) {
-      console.error(error);
-      props.onNotice(error instanceof Error ? error.message : '工程副本生成失败');
-    } finally {
-      setExporting(false);
-    }
+      if (event.key === 'Backspace') {
+        event.preventDefault();
+        if (!event.repeat) removeLastBlindTap();
+      }
+    };
+    window.addEventListener('keydown', handleBlindKey);
+    return () => window.removeEventListener('keydown', handleBlindKey);
+  }, [addBlindTap, blindPhase, blindReady, removeLastBlindTap, tab]);
+
+  const startBlindRecording = () => {
+    if (!blindReady || !activeLine) return;
+    setBlindPhase('recording');
+    props.onLooping(false);
+    props.onSeek(activeLine.start ?? timedLines[0]?.start ?? 0);
+    if (!props.playing) props.onTogglePlay();
   };
 
-  if (!activeLine) return null;
+  const finishBlindRecording = () => {
+    if (props.playing) props.onTogglePlay();
+    setBlindPhase('review');
+    const firstRecorded = props.lines.find((line) => blindTaps[line.id]?.length);
+    if (firstRecorded) props.onSelectLine(firstRecorded.id);
+    props.onNotice(`盲听完成，共记录 ${totalTaps} 个 la`);
+  };
+
+  const updateTapLabel = (lineId: string, tapId: string, value: string) => {
+    setBlindTaps((current) => ({ ...current, [lineId]: (current[lineId] ?? []).map((tap) => tap.id === tapId ? { ...tap, label: value } : tap) }));
+  };
+
+  const clearBlindDraft = () => {
+    setBlindTaps({});
+    setBlindPhase('ready');
+    props.onNotice('盲听打点已清空');
+  };
+
+  if (!activeLine || !blindLine) return null;
+  const reviewRows = Array.from({ length: Math.max(activeTaps.length, blindLine.tokens.length) }, (_, index) => ({ tap: activeTaps[index], token: blindLine.tokens[index] }));
+  const lineStart = blindLine.start ?? 0;
+  const lineEnd = blindLine.end ?? Math.max(lineStart + 1, props.duration);
+  const lineDuration = Math.max(.01, lineEnd - lineStart);
 
   return (
     <div className="lab-backdrop" role="presentation">
       <section className="lab-modal" role="dialog" aria-modal="true" aria-labelledby="lab-title">
         <header className="lab-header">
-          <div><span className="lab-kicker">LYRIC GRID EXPERIMENTS</span><h2 id="lab-title">词格实验室 <em>β</em></h2><p>只检查唱感、节奏和结构，不替你生成中文歌词。</p></div>
-          <div className="lab-overview"><span><b>{props.lines.length}</b> 句</span><span className={seriousCount ? 'alert' : 'good'}><b>{seriousCount}</b> 项待处理</span><button onClick={props.onClose} aria-label="关闭实验室">×</button></div>
+          <div><span className="lab-kicker">LYRIC GRID EXPERIMENTS</span><h2 id="lab-title">词格实验室 <em>β</em></h2><p>先凭耳朵打点，再拿原唱发音来核对；工具只帮你看，不替你写。</p></div>
+          <div className="lab-overview"><span><b>{props.lines.length}</b> 句</span><span className={totalTaps ? 'good' : ''}><b>{totalTaps}</b> 次打点</span><button onClick={props.onClose} aria-label="关闭实验室">×</button></div>
         </header>
 
-        <nav className="lab-tabs" aria-label="实验室工具">
+        <nav className="lab-tabs lab-tabs-compact" aria-label="实验室工具">
           {tabLabels.map(([value, label, note]) => <button key={value} className={tab === value ? 'active' : ''} onClick={() => setTab(value)}><b>{label}</b><small>{note}</small></button>)}
         </nav>
 
         <div className="lab-body">
-          {tab === 'health' && (
-            <div className="lab-health">
-              <div className="lab-section-heading"><div><span>01</span><h3>整首填词体检</h3><p>检查字数、短音咬字、高音开口和长音舒展度。</p></div><output>{seriousCount ? `${seriousCount} 项需要确认` : '没有明显问题'}</output></div>
-              <div className="health-list">
-                {allIssues.map(({ line, issues }, index) => <button key={line.id} className={line.id === props.activeId ? 'active' : ''} onClick={() => props.onSelectLine(line.id)}><span className="health-index">{String(index + 1).padStart(2, '0')}</span><span className="health-copy"><b>{lineLabel(line)}</b><small>{line.source}</small><span>{issues.length ? issues.map((issue, issueIndex) => <em className={issue.level} key={issueIndex}>{issue.text}</em>) : <em className="pass">✓ 唱感结构暂未发现明显问题</em>}</span></span><strong>{issues.filter((issue) => issue.level !== 'tip').length || '✓'}</strong></button>)}
-              </div>
-            </div>
-          )}
-
-          {tab === 'match' && (
-            <div className="lab-match">
-              <div className="lab-section-heading"><div><span>02</span><h3>原音—中文声韵对照</h3><p>分数只代表元音唱感接近程度，不代表歌词好坏。</p></div><select value={props.activeId} onChange={(event) => props.onSelectLine(event.target.value)}>{props.lines.map((line, index) => <option key={line.id} value={line.id}>第 {index + 1} 句 · {lineLabel(line)}</option>)}</select></div>
-              <div className="sound-match-grid">
-                {noteCellPairs(activeLine).map((pair) => {
-                  const reading = analyzeChineseCells(activeLine.target).cells[pair.index];
-                  const original = pair.note?.phoneme || pair.token?.label || pair.note?.lyric || '—';
-                  const score = pair.cell && pair.cell !== '—' ? soundScore(original, reading?.final ?? '') : 0;
-                  return <article key={`${pair.note?.id ?? 'cell'}-${pair.index}`} className={score >= 85 ? 'great' : score >= 60 ? 'near' : score ? 'far' : 'empty'}><span>{String(pair.index + 1).padStart(2, '0')}</span><div><small>原唱</small><b>{original}</b></div><i>→</i><div><small>中文</small><b>{pair.cell || '待填'}</b><em>{reading?.syllable ?? '—'} · {reading?.final || '无韵母'}</em></div><output>{score ? `${score}%` : '—'}</output></article>;
-                })}
-              </div>
-            </div>
-          )}
-
-          {tab === 'roll' && (
-            <div className="lab-roll">
-              <div className="lab-section-heading"><div><span>03</span><h3>全曲钢琴窗</h3><p>点击音符跳到对应时间；中文会直接显示在音符上。</p></div><div className="lab-transport"><button disabled={!props.audioAvailable} onClick={props.onTogglePlay}>{props.playing ? 'Ⅱ' : '▶'}</button><span>{formatTime(props.currentTime)} / {formatTime(rollBounds.end)}</span></div></div>
-              {rollNotes.length ? <div className="piano-scroll"><div className="piano-canvas" style={{ width: `${Math.max(1000, rollBounds.end * 18)}px`, '--pitch-span': String(Math.max(1, rollBounds.maximum - rollBounds.minimum)) } as CSSProperties}><div className="piano-playhead" style={{ left: `${(props.currentTime / rollBounds.end) * 100}%` }} /><div className="piano-grid-lines">{Array.from({ length: 12 }, (_, index) => <i key={index} />)}</div>{rollNotes.map((note) => <button key={`${note.lineId}-${note.id}`} className={`piano-note ${note.lineId === props.activeId ? 'active' : ''} ${note.role}`} style={{ left: `${(note.startSeconds / rollBounds.end) * 100}%`, width: `${Math.max(.16, ((note.endSeconds - note.startSeconds) / rollBounds.end) * 100)}%`, bottom: `${((note.pitch - rollBounds.minimum) / Math.max(1, rollBounds.maximum - rollBounds.minimum)) * 82 + 5}%` }} onClick={() => { props.onSelectLine(note.lineId); props.onSeek(note.startSeconds); }} title={`${note.cell || note.lyric} · M${note.pitch} · ${formatTime(note.startSeconds)}`}><b>{note.cell || (note.role === 'hold' ? '—' : note.lyric)}</b></button>)}</div></div> : <div className="lab-empty-state"><b>还没有音符时间轴</b><p>请先导入 SVP、MIDI、VSQX 或 VPR 工程。</p></div>}
-            </div>
-          )}
-
-          {tab === 'rhyme' && (
-            <div className="lab-rhyme">
-              <div className="lab-section-heading"><div><span>04</span><h3>全曲押韵地图</h3><p>相同韵母自动归为同色；只展示你的成品，不补写歌词。</p></div><output>{rhymeCounts.size} 组韵脚</output></div>
-              <div className="rhyme-legend">{[...rhymeCounts.entries()].sort((a, b) => b[1] - a[1]).map(([final, count], index) => <span key={final} style={{ '--rhyme-hue': `${(index * 67 + 96) % 360}` } as CSSProperties}><i />{final} 韵 <b>{count}</b></span>)}</div>
-              <div className="rhyme-map">{rhymeRows.map(({ line, rhyme }, index) => { const order = [...rhymeCounts.keys()].indexOf(rhyme?.final ?? ''); return <button key={line.id} onClick={() => props.onSelectLine(line.id)} className={!rhyme ? 'empty' : ''} style={{ '--rhyme-hue': `${(Math.max(0, order) * 67 + 96) % 360}` } as CSSProperties}><span>{String(index + 1).padStart(2, '0')}</span><b>{lineLabel(line)}</b><em>{rhyme ? `${rhyme.character} · ${rhyme.syllable} · ${rhyme.final} 韵` : '尚无可识别韵脚'}</em><i /></button>; })}</div>
-            </div>
-          )}
-
-          {tab === 'versions' && (
-            <div className="lab-versions">
-              <div className="lab-section-heading"><div><span>05</span><h3>版本快照与 A/B 对比</h3><p>只保存歌词与唱法，不复制庞大的工程音符。</p></div><div className="snapshot-create"><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} placeholder="例如：副歌第二版" /><button onClick={saveSnapshot}>保存当前版本</button></div></div>
-              {snapshots.length ? <><div className="snapshot-list">{snapshots.map((snapshot) => <article key={snapshot.id} className={snapshot.id === baselineId ? 'active' : ''}><button onClick={() => setBaselineId(snapshot.id)}><b>{snapshot.name}</b><small>{new Date(snapshot.createdAt).toLocaleString('zh-CN')} · {snapshot.lines.length} 句</small></button><button onClick={() => props.onRestoreDraft(snapshot.lines)}>恢复</button><button onClick={() => removeSnapshot(snapshot.id)}>删除</button></article>)}</div><div className="version-diff"><h4>当前版本与“{baseline?.name}”相比</h4>{changedLines.length ? changedLines.map(({ line, beforeText, afterText }, index) => <div key={line.id}><span>{String(index + 1).padStart(2, '0')}</span><del>{beforeText || '（空）'}</del><i>→</i><ins>{afterText || '（空）'}</ins></div>) : <p>没有歌词变化。</p>}</div></> : <div className="lab-empty-state"><b>还没有保存版本</b><p>先给当前成果拍一张“快照”，之后每次大改都能回来比较。</p><button onClick={saveSnapshot}>保存第一个版本</button></div>}
-            </div>
-          )}
-
-          {tab === 'export' && (
-            <div className="lab-export">
-              <div className="lab-section-heading"><div><span>06</span><h3>把中文写回歌声工程</h3><p>只生成一个新副本，音高、时值和参数保留，原文件永远不覆盖。</p></div></div>
-              <div className={`export-project-card ${props.writableProject ? 'ready' : ''}`}><span className="export-seal">{props.writableProject?.kind === 'svp' ? 'SVP' : props.writableProject?.fileName.match(/\.(vsqx|vpr)$/i)?.[1].toUpperCase() || '?'}</span><div><b>{props.writableProject?.fileName ?? '本次编辑没有可写回的原工程'}</b><p>{props.writableProject ? '会把每个已填写中文格写入对应歌唱音符；空格、延音和未填写内容保持原样。' : '请从“导入”重新选择 SVP、VSQX 或 VPR，再进入实验室。刷新网页后也需要重新选择原文件。'}</p><ul><li>✓ 另存“中文副本”</li><li>✓ 保留音高与时值</li><li>✓ 清除被替换音符的旧音素，让歌声软件重新发音</li></ul></div><button disabled={!props.writableProject || exporting} onClick={exportSingingProject}>{exporting ? '正在生成副本…' : '下载中文工程副本'}</button></div>
-              <div className="export-warning"><b>实验功能</b><p>不同歌声库对中文支持不同。导入副本后请在原软件里检查发音，尤其是日语声库唱中文的情况。</p></div>
-            </div>
-          )}
-
-          {tab === 'check' && (
-            <div className="lab-check">
-              <div className="lab-section-heading"><div><span>07</span><h3>导出前自检清单</h3><p>把会影响交付和试听的问题一次找齐。</p></div><output className={checklist.every((item) => item.good) ? 'good' : 'alert'}>{checklist.every((item) => item.good) ? '可以交付' : '还有项目要确认'}</output></div>
-              <div className="check-grid">{checklist.map((item) => <article className={item.good ? 'pass' : 'fail'} key={item.label}><span>{item.good ? '✓' : '!'}</span><div><b>{item.label}</b><p>{item.detail}</p></div><output>{item.value}</output></article>)}</div>
-              <div className="check-summary"><b>{checklist.every((item) => item.good) ? '所有基础检查都通过了。' : '这些不是硬性答案，只是交付前别忘了亲耳确认。'}</b><p>机器无法判断隐喻、情绪和演唱者的个人习惯，最后决定权始终在你。</p></div>
-            </div>
-          )}
-
           {tab === 'blind' && (
-            <div className="lab-blind">
-              <div className="lab-section-heading"><div><span>08</span><h3>盲听填词模式</h3><p>隐藏原词，只留下时间、词格数量和你的中文，逼自己相信耳朵。</p></div><button className="blind-reveal" onClick={() => setBlindReveal((value) => !value)}>{blindReveal ? '重新隐藏原词' : '揭晓原词'}</button></div>
-              <div className="blind-stage"><div className="blind-counter"><span>第 {activeIndex + 1} / {props.lines.length} 句</span><b>{baseCount(activeLine.tokens)} 个发音格</b></div><div className={`blind-source ${blindReveal ? 'revealed' : ''}`}>{blindReveal ? <><b>{activeLine.source}</b><small>{activeLine.tokens.map((token) => token.label).join(' ')}</small></> : <><b>原词已隐藏</b><small>先听，再决定每个字落在哪里</small></>}</div><div className="blind-cells">{activeLine.target.map((cell, index) => <span key={index} className={cell === '—' ? 'hold' : ''}><small>{String(index + 1).padStart(2, '0')}</small><b>{cell || '·'}</b></span>)}</div><div className="blind-player"><button disabled={!props.audioAvailable} onClick={props.onTogglePlay}>{props.playing ? 'Ⅱ 暂停' : '▶ 播放当前句'}</button><input type="range" min={activeLine.start ?? 0} max={activeLine.end ?? Math.max(props.duration, 1)} step=".01" value={Math.max(activeLine.start ?? 0, Math.min(props.currentTime, activeLine.end ?? Math.max(props.duration, 1)))} onChange={(event) => props.onSeek(Number(event.target.value))} /><span>{formatTime(props.currentTime)}</span></div><div className="blind-controls"><button disabled={activeIndex <= 0} onClick={() => { const line = props.lines[activeIndex - 1]; props.onSelectLine(line.id); props.onSeek(line.start ?? 0); }}>← 上一句</button><div>{[.5, .75, 1].map((value) => <button key={value} className={props.rate === value ? 'active' : ''} onClick={() => props.onRate(value)}>{value}×</button>)}<button className={props.looping ? 'active' : ''} onClick={() => props.onLooping(!props.looping)}>↻ 单句循环</button></div><button disabled={activeIndex >= props.lines.length - 1} onClick={() => { const line = props.lines[activeIndex + 1]; props.onSelectLine(line.id); props.onSeek(line.start ?? 0); }}>下一句 →</button></div>{!props.audioAvailable && <p className="blind-no-audio">先回到主编辑器右侧上传歌曲音频，盲听模式才可以播放。</p>}</div>
+            <div className="lab-blind blind-tap-lab">
+              <div className="lab-section-heading"><div><span>01</span><h3>空格盲听打点</h3><p>播放时每听见一个实际发音就按一次空格；按错可用 Backspace 撤回。</p></div><div className={`blind-phase-badge ${blindPhase}`}>{blindPhase === 'recording' ? '● 正在录入' : blindPhase === 'review' ? '对照修改' : '等待开始'}</div></div>
+              <div className="blind-readiness"><div className={props.audioAvailable ? 'ready' : ''}><span>{props.audioAvailable ? '✓' : '1'}</span><p><b>歌曲音频</b><small>{props.audioAvailable ? props.audioName || '已导入' : '请在主编辑器右侧上传 MP3'}</small></p></div><i>＋</i><div className={props.subtitleAvailable ? 'ready' : ''}><span>{props.subtitleAvailable ? '✓' : '2'}</span><p><b>LRC 时间轴</b><small>{props.subtitleAvailable ? props.subtitleName || '已导入' : '请导入带时间的 .lrc 文件'}</small></p></div></div>
+              {!blindReady ? <div className="blind-locked"><span>⌁</span><b>音频和 LRC 要同时到店</b><p>两个文件都导入后，这扇门才会打开。SRT、SVP 或 MIDI 的时间轴不会冒充 LRC。</p></div> : (
+                <div className={`blind-stage blind-tap-stage ${blindPhase}`}>
+                  <div className="blind-counter"><span>第 {blindLineIndex + 1} / {props.lines.length} 句</span><b>{activeTaps.length} 个 la</b><time>{formatTime(lineStart)} — {formatTime(lineEnd)}</time></div>
+                  <div className={`blind-source ${blindPhase === 'review' ? 'revealed' : ''}`}>{blindPhase === 'review' ? <><b>{blindLine.source}</b><small>{blindLine.tokens.map((token) => token.ipa || token.label).join(' ')}</small></> : <><b>{blindPhase === 'recording' ? '只听，不偷看' : '准备好耳朵了吗？'}</b><small>{blindPhase === 'recording' ? '听到一个音就按一下空格' : '从当前 LRC 歌词行开始播放'}</small></>}</div>
+                  <div className="blind-tap-timeline" aria-label="本句盲听打点时间线"><i className="blind-tap-playhead" style={{ left: `${Math.max(0, Math.min(100, ((props.currentTime - lineStart) / lineDuration) * 100))}%` }} />{activeTaps.map((tap, index) => <span key={tap.id} style={{ left: `${Math.max(0, Math.min(100, ((tap.time - lineStart) / lineDuration) * 100))}%` }}><b>la</b><small>{index + 1}</small></span>)}</div>
+                  <div className="blind-player blind-tap-player"><button onClick={props.onTogglePlay}>{props.playing ? 'Ⅱ 暂停' : '▶ 播放'}</button><input type="range" min={lineStart} max={lineEnd} step=".01" value={Math.max(lineStart, Math.min(props.currentTime, lineEnd))} onChange={(event) => props.onSeek(Number(event.target.value))} /><span>{formatTime(props.currentTime)}</span></div>
+                  {blindPhase === 'ready' && <button className="blind-start-button" onClick={startBlindRecording}>从当前句开始盲听</button>}
+                  {blindPhase === 'recording' && <div className="blind-hit-zone"><button onClick={addBlindTap}><kbd>SPACE</kbd><b>听到发音，打一个 la</b><small>手机也可以点这里</small></button><button onClick={removeLastBlindTap}>撤回上一个</button><button className="finish" onClick={finishBlindRecording}>完成并对照 →</button></div>}
+                  {blindPhase === 'review' && <><div className="blind-review-lines">{timedLines.map((line, index) => <button key={line.id} className={line.id === blindLine.id ? 'active' : ''} onClick={() => { props.onSelectLine(line.id); props.onSeek(line.start ?? 0); }}><span>{String(index + 1).padStart(2, '0')}</span><b>{blindTaps[line.id]?.length ?? 0} la</b><small>{line.source}</small></button>)}</div><div className="blind-compare"><div className="blind-compare-head"><span>你的盲听格</span><i>对照</i><span>原罗马音 / 英标</span></div>{reviewRows.map(({ tap, token }, index) => <div className={`${tap && token ? 'paired' : 'missing'}`} key={`${tap?.id ?? 'missing'}-${token?.id ?? index}`}><span>{String(index + 1).padStart(2, '0')}</span>{tap ? <input value={tap.label} onChange={(event) => updateTapLabel(blindLine.id, tap.id, event.target.value)} aria-label={`第 ${index + 1} 个盲听发音`} /> : <em>未打点</em>}<i>↔</i><b>{token?.ipa || token?.label || '多出的打点'}</b></div>)}</div><div className="blind-review-actions"><button onClick={clearBlindDraft}>清空重录</button><button disabled={!activeTaps.length} onClick={() => props.onApplyPronunciation(blindLine.id, activeTaps.map((tap) => tap.label.trim() || 'la').join(' '))}>应用为本句实际唱法</button></div></>}
+                  <div className="blind-controls"><button disabled={blindLineIndex <= 0} onClick={() => { const line = props.lines[blindLineIndex - 1]; props.onSelectLine(line.id); props.onSeek(line.start ?? 0); }}>← 上一句</button><div>{[.5, .75, 1].map((value) => <button key={value} className={props.rate === value ? 'active' : ''} onClick={() => props.onRate(value)}>{value}×</button>)}</div><button disabled={blindLineIndex >= props.lines.length - 1} onClick={() => { const line = props.lines[blindLineIndex + 1]; props.onSelectLine(line.id); props.onSeek(line.start ?? 0); }}>下一句 →</button></div>
+                </div>
+              )}
             </div>
           )}
+
+          {tab === 'match' && <div className="lab-match"><div className="lab-section-heading"><div><span>02</span><h3>原音—中文声韵对照</h3><p>分数只代表元音唱感接近程度，不代表歌词好坏。</p></div><select value={props.activeId} onChange={(event) => props.onSelectLine(event.target.value)}>{props.lines.map((line, index) => <option key={line.id} value={line.id}>第 {index + 1} 句 · {lineLabel(line)}</option>)}</select></div><div className="sound-match-grid">{noteCellPairs(activeLine).map((pair) => { const reading = analyzeChineseCells(activeLine.target).cells[pair.index]; const original = pair.note?.phoneme || pair.token?.ipa || pair.token?.label || pair.note?.lyric || '—'; const score = pair.cell && pair.cell !== '—' ? soundScore(original, reading?.final ?? '') : 0; return <article key={`${pair.note?.id ?? 'cell'}-${pair.index}`} className={score >= 85 ? 'great' : score >= 60 ? 'near' : score ? 'far' : 'empty'}><span>{String(pair.index + 1).padStart(2, '0')}</span><div><small>原唱</small><b>{original}</b></div><i>→</i><div><small>中文</small><b>{pair.cell || '待填'}</b><em>{reading?.syllable ?? '—'} · {reading?.final || '无韵母'}</em></div><output>{score ? `${score}%` : '—'}</output></article>; })}</div></div>}
+
+          {tab === 'rhyme' && <div className="lab-rhyme"><div className="lab-section-heading"><div><span>03</span><h3>全曲押韵地图</h3><p>相同韵母自动归为同色；只展示你的成品，不补写歌词。</p></div><output>{rhymeCounts.size} 组韵脚</output></div><div className="rhyme-legend">{[...rhymeCounts.entries()].sort((a, b) => b[1] - a[1]).map(([final, count], index) => <span key={final} style={{ '--rhyme-hue': `${(index * 67 + 96) % 360}` } as CSSProperties}><i />{final} 韵 <b>{count}</b></span>)}</div><div className="rhyme-map">{rhymeRows.map(({ line, rhyme }, index) => { const order = [...rhymeCounts.keys()].indexOf(rhyme?.final ?? ''); return <button key={line.id} onClick={() => props.onSelectLine(line.id)} className={!rhyme ? 'empty' : ''} style={{ '--rhyme-hue': `${(Math.max(0, order) * 67 + 96) % 360}` } as CSSProperties}><span>{String(index + 1).padStart(2, '0')}</span><b>{lineLabel(line)}</b><em>{rhyme ? `${rhyme.character} · ${rhyme.syllable} · ${rhyme.final} 韵` : '尚无可识别韵脚'}</em><i /></button>; })}</div></div>}
+
+          {tab === 'check' && <div className="lab-check"><div className="lab-section-heading"><div><span>04</span><h3>导出前自检清单</h3><p>把会影响交付和试听的问题一次找齐。</p></div><output className={checklist.every((item) => item.good) ? 'good' : 'alert'}>{checklist.every((item) => item.good) ? '可以交付' : '还有项目要确认'}</output></div><div className="check-grid">{checklist.map((item) => <article className={item.good ? 'pass' : 'fail'} key={item.label}><span>{item.good ? '✓' : '!'}</span><div><b>{item.label}</b><p>{item.detail}</p></div><output>{item.value}</output></article>)}</div><div className="check-summary"><b>{checklist.every((item) => item.good) ? '所有基础检查都通过了。' : '这些不是硬性答案，只是交付前别忘了亲耳确认。'}</b><p>机器无法判断隐喻、情绪和演唱者的个人习惯，最后决定权始终在你。</p></div></div>}
+
+          <section className="lab-coming-street" aria-label="即将开放的实验工具"><div className="coming-street-heading"><span>AFTER HOURS</span><h3>实验街暂未营业</h3><p>旧工具已经撤下，这四间店正在重新装修。</p></div><div className="locked-shop-grid">{lockedShops.map(([name, note], index) => <article key={name} style={{ '--shop-delay': `${index * .35}s` } as CSSProperties}><div className="shop-sign"><span>COMING SOON</span><b>{name}</b><small>{note}</small></div><div className="shop-shutter"><i /><i /><i /><i /><i /><span>锁</span></div><footer><b>敬请期待</b><small>装修中 · 暂不接客</small></footer></article>)}</div></section>
         </div>
       </section>
     </div>

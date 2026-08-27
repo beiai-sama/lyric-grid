@@ -10,6 +10,7 @@ export type PronunciationToken = {
   source: 'ja' | 'en' | 'manual';
   components?: PronunciationToken[];
   linkCandidate?: boolean;
+  restoredKind?: Exclude<TokenKind, 'absorbed' | 'linked'>;
 };
 
 export type ParsedLyricLine = {
