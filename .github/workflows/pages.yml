@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - run: npm install --global npm@11.6.2
       - run: npm ci
       - run: npm run build:static
       - uses: actions/upload-pages-artifact@v3
