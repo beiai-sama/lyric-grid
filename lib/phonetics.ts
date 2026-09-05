@@ -55,7 +55,7 @@ async function getAnalyzer(): Promise<Analyzer> {
     analyzerPromise = import('kuromoji/build/kuromoji.js').then((module) =>
       new Promise<Analyzer>((resolve, reject) => {
         const kuromoji = unwrapDefault<KuromojiModule>(module);
-        kuromoji.builder({ dicPath: '/dict/' }).build((error, tokenizer) => {
+        kuromoji.builder({ dicPath: import.meta.env.VITE_STATIC_SITE ? `${import.meta.env.BASE_URL}dict/` : '/dict/' }).build((error, tokenizer) => {
           if (error) reject(error);
           else resolve({ parse: async (value: string) => tokenizer.tokenize(value) });
         });

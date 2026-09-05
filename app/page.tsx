@@ -1598,7 +1598,13 @@ export default function Home() {
     setAiResult('');
     try {
       const selectedLines = aiScope === 'all' ? lines : [activeLine];
-      const response = await fetch('/api/ai', {
+      const aiFetch = import.meta.env.VITE_STATIC_SITE
+        ? async (_url: string, init: RequestInit) => {
+            const { POST } = await import('./api/ai/route');
+            return POST(new Request(new URL('api/ai', window.location.href), init) as Parameters<typeof POST>[0]);
+          }
+        : fetch;
+      const response = await aiFetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1625,7 +1631,7 @@ export default function Home() {
       if (!response.ok || !result.content) throw new Error(result.error || 'AI 暂时没有返回结果');
       setAiResult(result.content);
     } catch (error) {
-      setAiResult(`没有完成分析：${error instanceof Error ? error.message : '请检查接口配置'}`);
+      setAiResult(`没有完成分析：${error instanceof Error ? error.message : '请检查接口配置'}${import.meta.env.VITE_STATIC_SITE ? '。静态版由浏览器直连智谱；如果接口未允许跨域访问，请使用支持跨域的官方接口环境。' : ''}`);
     } finally {
       setAiLoading(false);
     }
