@@ -1657,9 +1657,9 @@ export default function Home() {
       <input ref={vocaloidRef} type="file" accept=".vsqx,.vpr" onChange={handleVocaloid} hidden />
       <input ref={backgroundRef} type="file" accept="image/*" onChange={handleBackground} hidden />
       <header className="topbar">
-        <div className="brand" aria-label="词格 Lyric Grid">
+        <div className="brand" aria-label="词搭子 Lyric Grid">
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
-          <span className="brand-name">词格</span>
+          <span className="brand-name">词搭子</span>
           <span className="brand-en">LYRIC GRID</span>
         </div>
         <label className="project-title">
