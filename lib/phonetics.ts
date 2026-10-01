@@ -11,6 +11,7 @@ export type PronunciationToken = {
   components?: PronunciationToken[];
   linkCandidate?: boolean;
   restoredKind?: Exclude<TokenKind, 'absorbed' | 'linked'>;
+  unresolved?: boolean;
 };
 
 export type ParsedLyricLine = {
@@ -55,7 +56,7 @@ async function getAnalyzer(): Promise<Analyzer> {
     analyzerPromise = import('kuromoji/build/kuromoji.js').then((module) =>
       new Promise<Analyzer>((resolve, reject) => {
         const kuromoji = unwrapDefault<KuromojiModule>(module);
-        kuromoji.builder({ dicPath: import.meta.env.VITE_STATIC_SITE ? `${import.meta.env.BASE_URL}dict/` : '/dict/' }).build((error, tokenizer) => {
+        kuromoji.builder({ dicPath: import.meta.env?.VITE_STATIC_SITE ? `${import.meta.env.BASE_URL}dict/` : '/dict/' }).build((error, tokenizer) => {
           if (error) reject(error);
           else resolve({ parse: async (value: string) => tokenizer.tokenize(value) });
         });
@@ -286,6 +287,68 @@ function splitSegments(value: string): string[] {
   return value.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*|[^A-Za-z]+/g) ?? [value];
 }
 
+// Match complete words across tokenizer rows: IPADIC splits 燈火 into 燈 + 火.
+// Song-specific alternatives can still be supplied through 编辑唱法.
+const japaneseReadingOverrides = new Map([['燈火', 'トモシビ']]);
+const japaneseScript = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+function validKanaReading(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const kana = toHiragana(value.trim().normalize('NFKC'));
+  return /^[ぁ-ゖ][ぁ-ゖー]*$/u.test(kana) ? kana : undefined;
+}
+
+export function parseJapaneseRows(
+  rows: KuromojiRow[],
+  prefix = 'ja',
+): Pick<ParsedLyricLine, 'kana' | 'tokens' | 'uncertain'> {
+  const tokens: PronunciationToken[] = [];
+  const kanaParts: string[] = [];
+  let uncertain = false;
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    let row = rows[rowIndex];
+    const tokenPrefix = `${prefix}-${rowIndex}`;
+    for (const [surface, reading] of japaneseReadingOverrides) {
+      let combined = '';
+      let endIndex = rowIndex;
+      while (endIndex < rows.length && combined.length < surface.length) {
+        combined += rows[endIndex].surface_form;
+        endIndex += 1;
+      }
+      if (combined === surface) {
+        row = { surface_form: surface, reading, pronunciation: reading };
+        rowIndex = endIndex - 1;
+        break;
+      }
+    }
+
+    const pronunciation = validKanaReading(row.pronunciation)
+      ?? validKanaReading(row.reading)
+      ?? validKanaReading(row.surface_form);
+    if (!pronunciation) {
+      if (japaneseScript.test(row.surface_form)) {
+        // Keep the original text visible without guessing its number of syllables.
+        kanaParts.push(row.surface_form);
+        tokens.push({
+          id: makeId(tokenPrefix, 0),
+          label: row.surface_form,
+          kind: 'uncertain',
+          counted: false,
+          source: 'ja',
+          unresolved: true,
+        });
+        uncertain = true;
+      }
+      continue;
+    }
+    kanaParts.push(validKanaReading(row.reading) ?? pronunciation);
+    tokens.push(...kanaToTokens(pronunciation, tokenPrefix));
+  }
+
+  return { kana: kanaParts.join(' '), tokens, uncertain };
+}
+
 export async function parseLyricLine(source: string, lineIndex = 0): Promise<ParsedLyricLine> {
   let analyzer: Analyzer | undefined;
   const segments = splitSegments(source);
@@ -309,17 +372,14 @@ export async function parseLyricLine(source: string, lineIndex = 0): Promise<Par
       continue;
     }
 
-    if (!/[\u3040-\u30ff\u3400-\u9fff]/.test(segment)) continue;
+    if (!japaneseScript.test(segment)) continue;
     hasJapanese = true;
     analyzer ??= await getAnalyzer();
     const rows = await analyzer.parse(segment);
-    rows.forEach((row, rowIndex) => {
-      const kanaSurface = /^[\u3040-\u30ffー]+$/.test(row.surface_form) ? row.surface_form : undefined;
-      const pronunciation = row.pronunciation ?? row.reading ?? kanaSurface;
-      if (!pronunciation) return;
-      kanaParts.push(toHiragana(row.reading ?? pronunciation));
-      tokens.push(...kanaToTokens(pronunciation, `ja-${lineIndex}-${segmentIndex}-${rowIndex}`));
-    });
+    const parsed = parseJapaneseRows(rows, `ja-${lineIndex}-${segmentIndex}`);
+    if (parsed.kana) kanaParts.push(parsed.kana);
+    tokens.push(...parsed.tokens);
+    uncertain ||= parsed.uncertain;
   }
 
   return {
@@ -332,7 +392,17 @@ export async function parseLyricLine(source: string, lineIndex = 0): Promise<Par
 }
 
 export function manualPronunciationToTokens(value: string): PronunciationToken[] {
-  return value.trim().split(/\s+/).filter(Boolean).map((label, index) => {
+  return value.trim().split(/\s+/).filter(Boolean).flatMap<PronunciationToken>((label, index) => {
+    const kana = validKanaReading(label);
+    if (kana) {
+      return kanaToTokens(kana, `manual-${index}`).map((token) => ({ ...token, source: 'manual' }));
+    }
+    if (japaneseScript.test(label)) {
+      return {
+        id: makeId('manual', index), label, kind: 'uncertain',
+        counted: false, source: 'manual', unresolved: true,
+      };
+    }
     const linkedParts = label.split('+').filter(Boolean);
     if (linkedParts.length > 1) {
       const components = linkedParts.map((part, partIndex): PronunciationToken => ({
