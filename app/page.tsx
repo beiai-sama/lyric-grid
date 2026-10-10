@@ -4,6 +4,7 @@ import { CSSProperties, ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, 
 import {
   ParsedLyricLine,
   PronunciationToken,
+  applyJapaneseReadingCorrection,
   baseCount,
   linkPronunciationTokens,
   manualPronunciationToTokens,
@@ -52,6 +53,7 @@ import {
 } from '../lib/vocaloid';
 import { WritableProject } from '../lib/project-export';
 import LabModal from './lab';
+import DictionaryReadingEditor from './dictionary-reading-editor';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -191,7 +193,7 @@ const themeStorageKey = 'lyric-grid-theme-v1';
 const aiStorageKey = 'lyric-grid-ai-config-v1';
 const aiOathStorageKey = 'lyric-grid-ai-oath-v1';
 const aiOathText = '我不会使用AI生成歌词';
-const phoneticVersion = 2;
+const phoneticVersion = 3;
 
 function formatTime(value: number): string {
   if (!Number.isFinite(value)) return '00:00.00';
@@ -1739,7 +1741,7 @@ export default function Home() {
             })}
           </div>
           <button className="copy-all" onClick={copyLyrics}>复制整首中文歌词</button>
-          <div className="local-note"><span className="lock-icon">●</span><p><strong>仅保存在这台设备</strong><br />歌词和音频不会上传。</p></div>
+          <div className="local-note"><span className="lock-icon">●</span><p><strong>工程保存在这台设备</strong><br />查词时仅发送所填词组。</p></div>
         </aside>
 
         <section className="editor-panel" ref={editorPanelRef}>
@@ -1770,6 +1772,22 @@ export default function Home() {
                 <button className="text-button" onClick={startPronunciationEdit}>编辑唱法</button>
               </div>
             </div>
+
+            <DictionaryReadingEditor
+              key={`${activeLine.id}-${selectedTokenId}`}
+              line={activeLine}
+              selectedToken={selectedToken}
+              onApply={(span, reading) => {
+                try {
+                  const corrected = applyJapaneseReadingCorrection(activeLine, span, reading);
+                  updateActiveLine(() => corrected, '修正日文词组读音');
+                  flash(`这处「${span.surface}」的读音已更新，可撤销`);
+                  return undefined;
+                } catch (error) {
+                  return error instanceof Error ? error.message : '无法应用读音，请重新选择词组。';
+                }
+              }}
+            />
 
             {editingPronunciation ? (
               <div className="pronunciation-editor">
