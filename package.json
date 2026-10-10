@@ -6,6 +6,8 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
     "build:static": "vite build --config vite.static.config.ts",
     "dev": "vinext dev",
     "build": "vinext build",

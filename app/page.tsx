@@ -4,6 +4,7 @@ import { CSSProperties, ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, 
 import {
   ParsedLyricLine,
   PronunciationToken,
+  applyJapaneseReadingCorrection,
   baseCount,
   linkPronunciationTokens,
   manualPronunciationToTokens,
@@ -52,6 +53,7 @@ import {
 } from '../lib/vocaloid';
 import { WritableProject } from '../lib/project-export';
 import LabModal from './lab';
+import DictionaryReadingEditor from './dictionary-reading-editor';
 
 type LyricLine = ParsedLyricLine & {
   id: string;
@@ -191,7 +193,7 @@ const themeStorageKey = 'lyric-grid-theme-v1';
 const aiStorageKey = 'lyric-grid-ai-config-v1';
 const aiOathStorageKey = 'lyric-grid-ai-oath-v1';
 const aiOathText = '我不会使用AI生成歌词';
-const phoneticVersion = 2;
+const phoneticVersion = 3;
 
 function formatTime(value: number): string {
   if (!Number.isFinite(value)) return '00:00.00';
@@ -324,6 +326,7 @@ export default function Home() {
   const activeIndex = lines.findIndex((line) => line.id === activeId);
   const activeLine = lines[activeIndex] ?? lines[0];
   const suggestedCount = activeLine ? baseCount(activeLine.tokens) : 0;
+  const hasUnresolvedReadings = activeLine?.tokens.some((item) => item.unresolved) ?? false;
   const selectedTokenIndex = activeLine?.tokens.findIndex((item) => item.id === selectedTokenId) ?? -1;
   const selectedToken = selectedTokenIndex >= 0 ? activeLine.tokens[selectedTokenIndex] : undefined;
   const currentCount = activeLine
@@ -807,7 +810,12 @@ export default function Home() {
 
   const savePronunciation = () => {
     const tokens = manualPronunciationToTokens(manualPronunciation);
-    updateActiveLine((line) => ({ ...line, tokens, uncertain: false }), '修改实际唱法');
+    updateActiveLine((line) => ({
+      ...line,
+      tokens,
+      kana: tokens.length && tokens.every((item) => item.kana) ? tokens.map((item) => item.kana).join(' ') : '',
+      uncertain: tokens.some((item) => item.kind === 'uncertain'),
+    }), '修改实际唱法');
     setSelectedTokenId('');
     setEditingPronunciation(false);
     flash('实际唱法已更新');
@@ -829,6 +837,10 @@ export default function Home() {
     }
     const left = activeLine.tokens[leftIndex];
     const right = activeLine.tokens[rightIndex];
+    if (left.unresolved || right.unresolved) {
+      flash('请先点“编辑唱法”补全未知读音，再设置连读');
+      return;
+    }
     if (!left.counted && !right.counted) {
       flash('这两个音都已吸收，不需要再连成一格');
       return;
@@ -864,6 +876,10 @@ export default function Home() {
 
   const toggleSelectedTokenAbsorption = () => {
     if (!selectedToken) return;
+    if (selectedToken.unresolved) {
+      flash('请先点“编辑唱法”补全未知读音，再设置计字');
+      return;
+    }
     if (selectedToken.kind === 'linked') {
       flash('连读格请先拆开，再单独设置吸收');
       return;
@@ -1531,7 +1547,12 @@ export default function Home() {
       return;
     }
     rememberUndo('应用盲听实际唱法');
-    setLines((current) => current.map((line) => line.id === lineId ? { ...line, tokens, uncertain: false } : line));
+    setLines((current) => current.map((line) => line.id === lineId ? {
+      ...line,
+      tokens,
+      kana: tokens.length && tokens.every((item) => item.kana) ? tokens.map((item) => item.kana).join(' ') : '',
+      uncertain: tokens.some((item) => item.kind === 'uncertain'),
+    } : line));
     setActiveId(lineId);
     setSelectedCell(0);
     setSelectedTokenId('');
@@ -1713,14 +1734,14 @@ export default function Home() {
                   onClick={() => { setActiveId(line.id); setSelectedCell(0); setSelectedSvpNoteId(''); setSelectedMidiNoteId(''); setSelectedVocaloidNoteId(''); }}
                 >
                   <span className="line-index">{String(index + 1).padStart(2, '0')}</span>
-                  <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}{rhyme?.final && <em> · {rhyme.final} 韵</em>}</small></span>
+                  <span className="line-copy"><span lang="ja">{line.source}</span><small>{line.tokens.some((item) => item.unresolved) ? '读音待确认' : line.id === activeId ? '正在编辑' : filled ? '已有填词' : '尚未填写'}{rhyme?.final && <em> · {rhyme.final} 韵</em>}</small></span>
                   <span className="line-count">{count}<small>字</small></span>
                 </button>
               );
             })}
           </div>
           <button className="copy-all" onClick={copyLyrics}>复制整首中文歌词</button>
-          <div className="local-note"><span className="lock-icon">●</span><p><strong>仅保存在这台设备</strong><br />歌词和音频不会上传。</p></div>
+          <div className="local-note"><span className="lock-icon">●</span><p><strong>工程保存在这台设备</strong><br />查词时仅发送所填词组。</p></div>
         </aside>
 
         <section className="editor-panel" ref={editorPanelRef}>
@@ -1738,7 +1759,7 @@ export default function Home() {
               {showKana && <p className="kana-line">{activeLine.kana}</p>}
             </div>
             <div className="count-summary" aria-label="字数统计">
-              <div><span>基础建议</span><strong>{suggestedCount}<small>字</small></strong></div>
+              <div><span>{hasUnresolvedReadings ? '已确认部分' : '基础建议'}</span><strong>{suggestedCount}<small>字</small></strong></div>
               <div className="current-count"><span>当前设计</span><strong>{currentCount}<small>字</small></strong></div>
             </div>
           </div>
@@ -1752,12 +1773,28 @@ export default function Home() {
               </div>
             </div>
 
+            <DictionaryReadingEditor
+              key={`${activeLine.id}-${selectedTokenId}`}
+              line={activeLine}
+              selectedToken={selectedToken}
+              onApply={(span, reading) => {
+                try {
+                  const corrected = applyJapaneseReadingCorrection(activeLine, span, reading);
+                  updateActiveLine(() => corrected, '修正日文词组读音');
+                  flash(`这处「${span.surface}」的读音已更新，可撤销`);
+                  return undefined;
+                } catch (error) {
+                  return error instanceof Error ? error.message : '无法应用读音，请重新选择词组。';
+                }
+              }}
+            />
+
             {editingPronunciation ? (
               <div className="pronunciation-editor">
                 <input value={manualPronunciation} onChange={(event) => setManualPronunciation(event.target.value)} aria-label="用空格分开发音" autoFocus />
                 <button onClick={() => setEditingPronunciation(false)}>取消</button>
                 <button className="save-pronunciation" onClick={savePronunciation}>应用</button>
-                <small>用空格分格，例如：love 改成 ra bu；单独的 n、q、cl 默认可吸收。</small>
+                <small>用空格分格，例如：love 改成 ra bu；日文可直接填假名，如 ともしび；单独的 n、q、cl 默认可吸收。</small>
               </div>
             ) : (
               <div className="token-track" aria-label="分格罗马音">
@@ -1770,6 +1807,7 @@ export default function Home() {
                         <button
                           type="button"
                           className={`token-link-button ${recommendedLink ? 'recommended' : ''}`}
+                          disabled={Boolean(previous.unresolved || item.unresolved)}
                           onClick={() => linkTokens(previous.id, item.id)}
                           aria-label={`把 ${previous.label} 和 ${item.label} 连成一个中文格`}
                           title={recommendedLink ? '这里可能发生连读；点击后两个发音合占一个中文格' : '让左右两个发音合占一个中文格'}
@@ -1782,14 +1820,14 @@ export default function Home() {
                         className={`phoneme-token ${item.kind} ${item.linkCandidate ? 'link-candidate' : ''} ${!item.counted ? 'not-counted' : ''} ${selectedTokenId === item.id ? 'selected' : ''}`}
                         onClick={() => setSelectedTokenId((current) => current === item.id ? '' : item.id)}
                         aria-pressed={selectedTokenId === item.id}
-                        title={item.kind === 'linked' ? '这是一个连读格；点选后可以拆开' : item.counted ? '点选后可以设为吸收' : '点选后可以恢复计字'}
+                        title={item.unresolved ? '读音未知；请点“编辑唱法”补全假名或罗马音' : item.kind === 'linked' ? '这是一个连读格；点选后可以拆开' : item.counted ? '点选后可以设为吸收' : '点选后可以恢复计字'}
                       >
                         <span>{item.label}</span>
-                        {!item.counted && <small>已吸收</small>}
+                        {!item.counted && !item.unresolved && <small>已吸收</small>}
                         {item.kind === 'long' && item.counted && <small>长音</small>}
                         {item.kind === 'linked' && <small>连读一格</small>}
                         {item.linkCandidate && item.kind !== 'linked' && <small>可连</small>}
-                        {item.kind === 'uncertain' && <small>待确认</small>}
+                        {item.kind === 'uncertain' && <small>{item.unresolved ? '读音待确认' : '待确认'}</small>}
                       </button>
                     </div>
                   );
@@ -1802,10 +1840,12 @@ export default function Home() {
                 <div className="token-selection-copy">
                   <span>已选第 {selectedTokenIndex + 1} 个发音</span>
                   <strong>{selectedToken.label}</strong>
-                  <small>{selectedToken.kind === 'linked' ? '当前由多个发音合占一个中文格' : selectedToken.counted ? '当前计入一个中文字' : '当前不占中文字'}</small>
+                  <small>{selectedToken.unresolved ? '读音尚未确认，暂未计入建议字数' : selectedToken.kind === 'linked' ? '当前由多个发音合占一个中文格' : selectedToken.counted ? '当前计入一个中文字' : '当前不占中文字'}</small>
                 </div>
                 <div className="token-selection-actions">
-                  {selectedToken.kind === 'linked' ? (
+                  {selectedToken.unresolved ? (
+                    <button className="primary" onClick={startPronunciationEdit}>编辑唱法补全读音</button>
+                  ) : selectedToken.kind === 'linked' ? (
                     <button className="primary" onClick={splitSelectedToken}>拆开连读</button>
                   ) : (
                     <>
@@ -1926,7 +1966,7 @@ export default function Home() {
               </div>
             )}
 
-            <div className="analysis-note"><span className="analysis-spark">✦</span>{activeLine.vocaloid ? `${activeLine.vocaloid.format} 已保留原音符与歌词；读法仍以听感为准，可点“编辑唱法”修正。` : activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '英文先按标准发音估算；如果原唱采用日式或特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}。“吸收”是不占中文字；点两格中间的“连”，才会让两个音合占一格。`}</div>
+            <div className="analysis-note"><span className="analysis-spark">✦</span>{hasUnresolvedReadings ? '部分日文未查到读音，已保留原文并标记“读音待确认”；建议字数仅包含已确认部分。请点“编辑唱法”，把待确认原文换成假名或用空格分开的罗马音。' : activeLine.vocaloid ? `${activeLine.vocaloid.format} 已保留原音符与歌词；读法仍以听感为准，可点“编辑唱法”修正。` : activeLine.midi && !activeLine.midi.hasEmbeddedLyrics ? '这个 MIDI 没有内嵌歌词，当前用 la 按音符占位；请点“编辑唱法”改成你听到的歌词。' : activeLine.uncertain ? '发音先按词典估算；如果原唱采用特殊唱法，请点“编辑唱法”按听到的结果修改。' : `当前唱法为 ${pronunciationLabel}。“吸收”是不占中文字；点两格中间的“连”，才会让两个音合占一格。`}</div>
           </section>
 
           <section className={`editor-section target-section ${followLyrics && playing ? 'lrc-entering lrc-entering-late' : ''}`} key={`target-${activeLine.id}`}>
